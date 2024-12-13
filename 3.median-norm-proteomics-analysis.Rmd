@@ -1,0 +1,1127 @@
+---
+title: "proteomics-analysis"
+author: "Fanning Xia"
+date: "2024-05-07"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# 0. Preparation work
+## Load, filter the data and create sample info
+
+```{r}
+# load packages
+library(NormalyzerDE)
+library(preprocessCore)
+library(ggplot2)
+library(dplyr)
+library(UniprotR)
+library(rentrez)
+library(reshape2)
+library(dendextend)
+library(biomaRt)
+library(ggfortify)
+library(cluster)
+library(tidyr)
+library(ggsci)
+library(scales)
+library(car)
+library(FSA)
+library(svglite)
+
+pvg3 <- c("#979FA2","#EE9B00","#93D2DF")
+```
+
+```{r}
+# set working directory
+setwd("/Volumes/projects/fx2482/proteomics-2cellstage/")
+
+# load data for heatmap
+counts <- read.csv("input/raw_norm_Am_cavefish-embryo_WCE_PROT941-TMT9_hph_neo_125min_2.csv")
+counts <- counts[, c(4:5,8,30:66)]
+
+# remove Contaminant
+valid_counts <- counts[!grepl("^Contaminant_", counts$Accession),]
+
+# remove other parameters, just keep raw counts
+rownames(valid_counts) <- valid_counts[,1]
+
+ms_normcounts <- valid_counts[,23:31] # normalized counts from Mass Spec core
+valid_counts <- valid_counts[,14:22] # raw counts
+
+# check if there's any NA not in the entire row
+rows_with_partial_NAs <- valid_counts[rowSums(is.na(valid_counts)) > 0 & rowSums(!is.na(valid_counts)) > 0, ]
+rows_with_partial_NAs #results show no partial NAs, we can remove this parameter
+rm(rows_with_partial_NAs)
+
+# remove all lines with NA 
+valid_counts <- na.omit(valid_counts)
+ms_normcounts <- na.omit(ms_normcounts)
+
+# find unique rows, need to remove the rows with exact same value in every columns (remove repetitive rows)
+# Initally I want to use PEP score to keep unique rows, but PEP score is not necessarily correlated with unique names
+# unique_counts <- counts[!duplicated(counts$Sum.PEP.Score), ]
+
+unique_counts <- unique(valid_counts)
+ms_normcounts <- unique(ms_normcounts)
+
+#unique_counts[unique_counts ==  0] <- 1 # was trying to change it to 0.01, but it will have an error during log normalization. I will check eventually if there is one gene differentially expressed with this artifical 1
+
+#write.table(unique_counts, file='input/prep_normDE_counts.tsv', quote=FALSE, sep='\t', col.names = NA)
+#write.table(rownames(unique_counts)[grep("^XP|^NP", rownames(unique_counts))], file='input/prep_normDE_XP_ID.tsv', quote=FALSE, sep='\t', col.names = NA)
+#write.table(rownames(unique_counts)[grep("^KAG", rownames(unique_counts))], file='input/prep_normDE_KAG_ID.tsv', quote=FALSE, sep='\t', col.names = NA)
+
+
+# create a sample info table
+sampleinfo <- data.frame(
+  sample = colnames(unique_counts),
+  group = c("Molino","Molino","Molino", "Pachón","Pachón","Pachón", "Surface_fish","Surface_fish","Surface_fish"),
+  stringsAsFactors = FALSE  # This ensures that text columns are not converted to factors
+)
+
+#write.table(sampleinfo, file='input/prep_normDE_sampleinfo.tsv', quote=FALSE, sep='\t', col.names = NA)
+
+```
+
+
+# 1. Normalization methods
+
+Used NormalyzerDE
+
+Paper: NormalyzerDE: Online Tool for Improved Normalization of Omics Expression Data and High-Sensitivity Differential Expression Analysis
+https://pubs.acs.org/doi/10.1021/acs.jproteome.8b00523
+
+Package: Evaluation and statistics of expression data using NormalyzerDE
+https://www.bioconductor.org/packages/release/bioc/vignettes/NormalyzerDE/inst/doc/vignette.html#stepwise-processing-normalization-part
+
+## 1.1 Running NormalyzerDE evaluation
+
+```{r}
+# 1. load data
+jobName <- "vignette_run"
+designFp <- "/Volumes/projects/fx2482/proteomics-2cellstage/input/prep_normDE_sampleinfo.tsv"
+dataFp <- "/Volumes/projects/fx2482/proteomics-2cellstage/input/prep_normDE_counts.tsv"
+
+experimentObj <- setupRawDataObject(dataFp, designFp, "default", TRUE, "sample", "group")
+normObj <- getVerifiedNormalyzerObject(jobName, experimentObj)
+
+# 2. generate normalizations
+normResults <- normMethods(normObj)
+
+# 3. generate performance measures
+normResultsWithEval <- analyzeNormalizations(normResults)
+
+# 4. output matrices to file
+jobDir <- setupJobDir("vignette_run", "/Volumes/projects/fx2482/proteomics-2cellstage/output/")
+#writeNormalizedDatasets(normResultsWithEval, jobDir)
+
+# 5. generate evaluation plots
+#generatePlots(normResultsWithEval, jobDir)
+
+rm(jobName, dataFp, experimentObj,normObj,normResults,normResultsWithEval)
+
+```
+
+## 1.2 Median normalization - Differential expression analysis
+
+```{r}
+# 1. Setup folders and data matrices
+
+bestNormMatPath <- paste(jobDir, "median-normalized.txt", sep="/")
+experimentObj <- setupRawContrastObject(bestNormMatPath, designFp, "sample")
+nst <- NormalyzerStatistics(experimentObj, logTrans=FALSE)
+
+# 2. Calculate statistics
+# Now we are ready to perform the contrasts. Contrasts are provided as a vector in the format c("condA-condB", "condB-condC"), where condX is the group levels.
+
+comparisons <- c("Molino-Surface_fish", "Pachón-Surface_fish")
+nst <- calculateContrasts(nst, comparisons, condCol="group", leastRepCount=2)
+
+# 3. Generate final matrix and output
+annotDf <- generateAnnotatedMatrix(nst)
+jobDir <- setupJobDir("DEG-analysis", "/Volumes/projects/fx2482/proteomics-2cellstage/output/vignette_run/median-norm/")
+#write.csv(annotDf, file=paste(jobDir, "stat_table.csv", sep="/"))
+#generateStatsReport(nst, "Vignette stats", jobDir)
+
+rm(bestNormMatPath,experimentObj,nst,comparisons)
+```
+
+## 1.3 Annotation: transfer protein ID to entrez ID (NCBI gene ID)
+version (not entirely sure, mostly should be AstMex_SF_3)
+https://www.ncbi.nlm.nih.gov/datasets/genome/?taxon=7994
+
+Will be hiden due to output purposes!
+
+### 1.3.1 For XP protein ids - rentrez
+
+```{r}
+# load rentrez package to interact with the NCBI E-utilities
+#library(rentrez)
+
+# Define a vector of protein IDs
+#protein_ids <- rownames(unique_counts)[grep("^XP|^NP", rownames(unique_counts))]
+
+# Define the database to query (e.g., 'gene' for Entrez Gene)
+#database <- "gene"
+
+# Function to convert protein IDs to Entrez Gene IDs
+convert_protein_ids <- function(protein_ids, database = "gene") {
+  # Initialize a list to store results
+  gene_ids <- vector("list", length = length(protein_ids))
+  
+  # Loop over each protein ID
+  for (i in seq_along(protein_ids)) {
+    # Construct the query
+    query <- paste(protein_ids[i], "[Accession]", sep = " ")
+    
+    # Perform the search
+    search_results <- entrez_search(db = database, term = query)
+    
+    # Extract the Entrez Gene ID from the search results
+    if (search_results$count > 0) {
+      gene_ids[[i]] <- search_results$ids[1]
+    } else {
+      gene_ids[[i]] <- NA
+    }
+  }
+  
+  # Return the list of Entrez Gene IDs
+  return(gene_ids)
+}
+
+# Convert protein IDs to Entrez Gene IDs
+#entrez_gene_ids <- convert_protein_ids(protein_ids, database) 
+
+# Print the results
+#for (i in seq_along(protein_ids)) {
+  #cat("Protein ID:", protein_ids[i], "corresponds to Entrez Gene ID:", entrez_gene_ids[[i]], "\n")
+#}
+
+# get the unlist result
+#annotDf_gene <- data.frame(
+#  protein_id = protein_ids,
+#  gene_id = unlist(entrez_gene_ids),
+#  stringsAsFactors = FALSE  # This ensures that text columns are not converted to factors
+#)
+
+#write.csv(annotDf_gene,"output/vignette_run/annotation/XPandNP_protein_to_gene_annotation.csv", sep="/"))
+
+#rm(protein_ids,database)
+
+```
+
+### 1.3.2 For KAG protein ids
+
+```{r}
+
+# first get old mapping from MS core / ThermoFisher
+
+#counts <- read.csv("input/raw_norm_Am_cavefish-embryo_WCE_PROT941-TMT9_hph_neo_125min_2.csv")
+#rownames(counts) <- counts$Accession
+
+#protein_ids_KAG <- rownames(unique_counts)[grep("^KAG", rownames(unique_counts))]
+#protein_KAG <- counts[protein_ids_KAG,]
+
+#test <- protein_KAG[,c(4,22,24,25)]
+#test$Gene.Symbol <- tolower(test$Gene.Symbol) #get them into lower case
+
+
+```
+
+#### 1.3.2.1 Use biomaRt to find gene ids
+
+```{r}
+
+#ensembl <- useEnsembl(biomart = "ensembl",
+#                       dataset = "amexicanus_gene_ensembl",
+#                       mirror = "useast")
+
+#filters <- listFilters(ensembl)
+#grep("XP_", filters$description, value = TRUE, ignore.case = TRUE)
+#grep("KAG", filters$description, value = TRUE, ignore.case = TRUE)
+#grep("ENS", filters$description, value = TRUE, ignore.case = TRUE)
+
+#test.1 <- getBM(attributes = c("entrezgene_id","entrezgene_accession"),
+#                          filters = "entrezgene_accession",
+#                          values = test$Gene.Symbol,
+#                          mart = ensembl)
+#test.2 <- left_join(test, test.1, by = c("Gene.Symbol" = "entrezgene_accession"))
+
+# then ony keep one lane once we found each conditions
+# find common annotated rows between pd annotation and our annotation
+#test.3 <- test.2[test.2$Entrez.Gene.ID == test.2$entrezgene_id,]
+#test.3 <- na.omit(test.3)
+#test.3 <- test.3[,c(1:4)]
+
+# find annotated rows only in new mapping
+#test.4 <- test.2[test.2$Entrez.Gene.ID == "" & !is.na(test.2$entrezgene_id),]
+#test.4$Entrez.Gene.ID <- test.4$entrezgene_id
+#test.4 <- test.4[,c(1:4)]
+
+# find annotated rows only in original mapping
+#test.5 <- test.2[!test.2$Entrez.Gene.ID == "" & is.na(test.2$entrezgene_id),]
+#test.5 <- test.5[,c(1:4)]
+
+# find annotated rows with different values
+#test.6 <- test.2[!test.2$Entrez.Gene.ID == "" & !is.na(test.2$entrezgene_id) & test.2$Entrez.Gene.ID != test.2$entrezgene_id,]
+#test.6 <- test.6[,c(1:4)] #by manual check, originally mapped ones were correct (mostly)
+
+# all unannotated ones
+#test.7 <- test.2[test.2$Entrez.Gene.ID == "" & is.na(test.2$entrezgene_id),]
+#test.7 <- test.7[,c(1:4)]
+
+#annoDF_protein_KAG <- rbind(test.3,test.4,test.5,test.6)
+#rm(test,test.1,test.2,test.3,test.4,test.5,test.6)
+```
+
+#### 1.3.2.2 Use rentrez to find gene ids
+
+```{r}
+# Define a vector of leftover genes unannotated in test.7
+#gene_names <- test.7$Gene.Symbol
+
+# Define the database to query (e.g., 'gene' for Entrez Gene)
+#database <- "gene"
+
+# Function to convert pd annotated gene names IDs to Entrez Gene IDs
+convert_gene_names <- function(gene_names, database = "gene") {
+  # Initialize a list to store results
+  gene_ids <- vector("list", length = length(gene_names))
+  
+  # Loop over each gene_names
+  for (i in seq_along(gene_names)) {
+    # Construct the query
+    query <- paste(gene_names[i], "[Gene Name] AND", 7994, "[Taxonomy ID]", sep = " ")
+    
+    # Perform the search
+    search_results <- entrez_search(db = database, term = query)
+    
+    # Extract the Entrez Gene ID from the search results
+    if (search_results$count > 0) {
+      gene_ids[[i]] <- search_results$ids[1]
+    } else {
+      gene_ids[[i]] <- NA
+    }
+  }
+  
+  # Return the list of Entrez Gene IDs
+  return(gene_ids)
+}
+
+# Convert protein IDs to Entrez Gene IDs
+#geneid_based_on_gene_names <- convert_gene_names(gene_names, database)
+
+#test.7$Entrez.Gene.ID <- unlist(geneid_based_on_gene_names)
+
+# combine it 
+#annoDF_protein_KAG <- rbind(annoDF_protein_KAG, test.7[complete.cases(test.7) & test.7$Gene.Symbol != "",])
+
+#rm(database)
+```
+
+#### 1.3.2.3 Manual annotation
+
+```{r}
+# find final rows without any annotations
+#test.8 <- test.7[!complete.cases(test.7) | test.7$Gene.Symbol == "",]
+
+#mannual annotation
+#test.8$Entrez.Gene.ID <- c("103033944", "103045882", "103046345","103034887","111190432",
+#                           "103029774", "","103047682","103022465","103046426",
+#                           "103039390", "103028412", "107197318", "103025840","103038803",
+#                           "111192975", "103034887", "103039618","103045988","103046720",
+#                           "111191983", "103037668", "103042293", "103035393", "103023629",
+#                           "103022532", "103027693", "103034296", "103036175", "103033541",
+#                           "103040660", "103025109", "103034086", "103027409", "103022177",
+#                           "103047533", "103037884", "103041583", "103024822", "103034233",
+#                           "103023892", "107197708", "","103028044", "125806057",
+#                           "111188250", "103046166", "103024139", "103036797", "103022403",
+#                           "103041044", "103022710", "111193015", "103026176", "103026776",
+#                           "111196314", "111197585", "103028468", "111191983", "103024037",
+#                           "103026173", "103045882", "103046193", "103029047", "103028685",
+#                           "111195933"
+#                           )
+#annoDF_protein_KAG <- rbind(annoDF_protein_KAG, test.8)
+#write.csv("output/vignette_run/annotation/KAG_protein_to_gene_annotation.csv", sep="/"))
+
+#rm(test.7,test.8)
+```
+
+### 1.3.3 Get the full annotation for all unique protein findings
+
+```{r}
+# make all annotations regardless of XP_ or KAG the same
+# load annotations
+
+ann_XP <- read.csv("output/vignette_run/annotation/XPandNP_protein_to_gene_annotation.csv")
+ann_KAG <- read.csv("output/vignette_run/annotation/KAG_protein_to_gene_annotation.csv")
+
+ann_XP <- ann_XP[,2:3]
+ann_KAG <- ann_KAG[,2:3]
+colnames(ann_KAG) <- colnames(ann_XP)
+
+anno_all <- rbind(ann_KAG,ann_XP)
+
+#write.csv(anno_all, "output/vignette_run/annotation/unique_protein_to_gene_annotation.csv")
+
+library(dplyr)
+annotDf_df <- left_join(anno_all, annotDf, c("protein_id"="V1"))
+annotDf_df$gene_id <- as.integer(annotDf_df$gene_id)
+
+#write.csv(annotDf_df, "output/vignette_run/median-norm/DEG-analysis/All_protein_to_gene_annotation.csv")
+
+rm(ann_XP,ann_KAG,anno_all)
+
+```
+
+# 2. Check if two collection methods are well separated
+
+All surface fish samples were collected through "natural spawning (NS)", and all Molino cavefish samples were collected through night IVF. In Pachón samples, 128N was collected by NS and 128C and 129N were by IVF. This is to test if the collection methods would affect the comparisons especially for Molino and surface fish.
+
+```{r}
+# Comparison as a whole
+
+# comparison data creation
+
+df <- annotDf_df[,c(2,13:15)]
+
+# Reshaping data to long format
+long_df <- pivot_longer(df, cols = -gene_id, names_to = "Sample", values_to = "Value")
+long_df <- long_df %>%
+  mutate(Method = case_when(
+    Sample %in% "Abundance..F8..128N..Sample..Pachon" ~ "NS", 
+    Sample %in% c("Abundance..F8..128C..Sample..Pachon", "Abundance..F8..129N..Sample..Pachon") ~ "IVF"
+  ))
+
+# Check normality for each group
+ggplot(long_df, aes(sample = Value)) +
+  facet_wrap(~ Method) +
+  stat_qq() +
+  stat_qq_line() +
+  theme_minimal() +
+  labs(title = "Q-Q Plots by Method") # They are not normally distributed
+
+by(long_df$Value, long_df$Method, shapiro.test) # not normally distributed
+
+# Check homogeneity of variances (Levene's Test)
+leveneTest(Value ~ Method, data = long_df) # not homogeneous
+
+# Perform Mann-Whitney U test
+wilcox.test(Value ~ Method, data = long_df) # non-significant
+
+rm(df,long_df)
+```
+
+```{r}
+# Comparison individually
+
+df <- annotDf_df[,c(2,13:15)]
+df <- na.omit(df)
+
+# Create an empty vector to store p-values
+p_values <- numeric(nrow(df))
+
+# Loop through each row/gene
+for (i in 1:nrow(df)) {
+  # Subset data for the current row/gene
+  data_row <- df[i, ]
+  
+  # Subset data based on the method of collection
+  data_method_ns <- data_row[colnames(data_row) == "Abundance..F8..128N..Sample..Pachon"]
+  data_method_ivf <- data_row[colnames(data_row) %in% c("Abundance..F8..128C..Sample..Pachon", "Abundance..F8..129N..Sample..Pachon")]
+  
+  # Perform t-test
+  t_test_result <- t.test(data_method_ivf, mu = data_method_ns$Abundance..F8..128N..Sample..Pachon)
+  
+  # Extract p-value and store it
+  p_values[i] <- t_test_result$p.value
+}
+
+df$p.value <- p_values
+df$p.adj <- p.adjust(df$p.value, method = "BH")
+
+# print any significant expressed gene names
+print(df[df$p.adj < 0.05, ])
+
+rm(i,df,p_values,data_row,data_method_ns,data_method_ivf,t_test_result)
+```
+
+Conclusion for this: generally, the collection method might not impact the results. Only 2 genes were found significantly affected by the methods. I will need to keep these two in mind if anything pop up in the final result. They are: "eif3hb" and "gemin7"
+
+# 3. Get results from DEG analysis
+
+## Some parameters
+
+```{r}
+# How many unique gene ID?
+length(unique(annotDf_df$gene_id))
+```
+
+```{r}
+# How many percentage of vtgs? (an estimate)
+
+# Find all vtgs (used ms annotations, I need to talk to Di about all annotations of shinyapps)
+
+df <- annotDf_df
+rownames(df) <- df$protein_id
+df <- df[,10:18]
+df = 2^df
+df[is.na(df)] <- 0
+
+sum(df[rownames(df) %in% c("XP_022535137.2","XP_049320372.1","XP_049321622.1","XP_022525474.2","XP_049321621.1","KAG9266789.1","XP_049321630.1","KAG9266788.1","XP_007233218.3","KAG9266776.1","XP_022532042.2"), ])/sum(df)
+```
+
+## DEG analysis
+
+```{r}
+up_cav <- annotDf_df[annotDf_df$`Molino-Surface_fish_AdjPVal` < 0.05 & annotDf_df$`Pachón-Surface_fish_AdjPVal` < 0.05 & annotDf_df$`Molino-Surface_fish_log2FoldChange` > 0.5 & annotDf_df$`Pachón-Surface_fish_log2FoldChange` >0.5, ]
+
+up_pa <- annotDf_df[annotDf_df$`Pachón-Surface_fish_AdjPVal` < 0.05 & annotDf_df$`Pachón-Surface_fish_log2FoldChange` >0.5, ]
+
+up_mo <- annotDf_df[annotDf_df$`Molino-Surface_fish_AdjPVal` < 0.05 & annotDf_df$`Molino-Surface_fish_log2FoldChange` > 0.5, ]
+
+down_cav <- annotDf_df[annotDf_df$`Molino-Surface_fish_AdjPVal` < 0.05 & annotDf_df$`Pachón-Surface_fish_AdjPVal` < 0.05 & annotDf_df$`Molino-Surface_fish_log2FoldChange` < -0.5 & annotDf_df$`Pachón-Surface_fish_log2FoldChange` < -0.5, ]
+
+down_pa <- annotDf_df[annotDf_df$`Pachón-Surface_fish_AdjPVal` < 0.05 & annotDf_df$`Pachón-Surface_fish_log2FoldChange` < -0.5, ]
+
+down_mo <- annotDf_df[annotDf_df$`Molino-Surface_fish_AdjPVal` < 0.05 & annotDf_df$`Molino-Surface_fish_log2FoldChange` < -0.5, ]
+
+#write.csv(up_cav, file=paste(jobDir, "annotated with NCBI gene id_upregulated in cavefish.csv", sep="/"))
+#write.csv(down_cav, file=paste(jobDir, "annotated with NCBI gene id_downregulated in cavefish.csv", sep="/"))
+#write.csv(up_pa, file=paste(jobDir, "annotated with NCBI gene id_upregulated in Pachón.csv", sep="/"))
+#write.csv(up_mo, file=paste(jobDir, "annotated with NCBI gene id_upregulated in Molino.csv", sep="/"))
+#write.csv(down_pa, file=paste(jobDir, "annotated with NCBI gene id_downregulated in Pachón.csv", sep="/"))
+#write.csv(down_mo, file=paste(jobDir, "annotated with NCBI gene id_downregulated in Molino.csv", sep="/"))
+
+
+rm(up_cav,down_cav,up_pa,up_mo,down_pa,down_mo)
+```
+
+## NEED TO DO MOREannotate gene name and use this for zebrafish GO term
+
+```{r}
+
+library(dplyr)
+
+#annotDf_pro <- down_cav
+#annotDf_pro <- na.omit(annotDf_pro)
+
+#annotdf_protein_to_gene <- getBM(attributes = c("entrezgene_id","entrezgene_accession"),
+#                          filters = "entrezgene_id",
+#                          values = annotDf_pro$gene_id,
+#                          mart = ensembl)
+
+#annotDf_df <- left_join(annotdf_protein_to_gene, annotDf_test, by = c("refseq_peptide_predicted"="V1"))
+
+
+#write.csv(annotdf_protein_to_gene, file=paste(jobDir, "downcav_gene_ann.csv", sep="/"))
+```
+
+
+
+# 4. Plots
+
+## 4.1 Check for before and after normalization matrix boxplot
+
+### 4.1.1 Boxplot
+
+```{r}
+cols<-rep(c("darkcyan","darkorange3"),each=3)
+boxplot(log2(unique_counts),col=cols,main="before norm")
+boxplot(log2(ms_normcounts),col=cols,main="after norm from Mass spec core facility") # PD used normalization to the whole intensity, similar to global intensity normalization
+boxplot(annotDf_df[,10:18],col=cols,main="after median normalization")
+```
+
+### 4.1.2 Correlation plot
+
+```{r}
+# before normalization
+temp <- na.omit(unique_counts)
+temp[temp ==  0] <- 0.01
+pheatmap::pheatmap(cor(log2(temp)), main = "before norm")
+cor_plot <- pheatmap::pheatmap(cor(log2(temp)), main = "before norm")
+
+#ggsave("output/vignette_run/median-norm/before-norm-correlation-plot.png", plot = cor_plot,width = 10, height = 10, units = "in")
+
+# after norm from Mass spec core facility
+temp <- na.omit(ms_normcounts)
+temp[temp ==  0] <- 0.01
+pheatmap::pheatmap(cor(log2(temp)), main = "after norm from Mass spec core facility", method = "spearman")
+
+# after median normalization
+temp <- na.omit(annotDf[,9:17])
+pheatmap::pheatmap(cor(log2(temp)), main = "after median normalization")
+cor_plot <- pheatmap::pheatmap(cor(log2(temp)), main = "after median normalization")
+
+#ggsave("output/vignette_run/median-norm/median-norm-correlation-plot.png", plot = cor_plot,width = 10, height = 10, units = "in")
+rm(temp, cor_plot)
+```
+
+### Figure 2B PCA plot
+
+```{r}
+#from https://cran.r-project.org/web/packages/ggfortify/vignettes/plot_pca.html
+#from https://bioinformatics-core-shared-training.github.io/Bulk_RNAseq_Course_2021/Markdowns/07_Data_Exploration.html#principal-component-analysis
+
+#To run the PCA we should first normalise our data for library size and transform to a log scale. 
+
+# read the norm data
+normCounts <- annotDf[,9:17]
+
+# remove NA lines
+filtered_normCounts <- normCounts[complete.cases(normCounts), ]
+
+log_data <- log2(filtered_normCounts + 1)
+pca_res <- prcomp(t(log_data), scale. = TRUE)
+pca_plot <- autoplot(pca_res, label = TRUE)
+#ggsave("output/vignette_run/median-norm/Proteomics - PCA plot (median-norm) with specific sample name.png", plot = pca_plot, width = 10, height = 8, units = "in")
+
+rm(pca_plot)
+
+# read sampleinfo
+sampleinfo <- data.frame(
+  sample = colnames(unique_counts),
+  Population = c("Molino","Molino","Molino", "Pachón","Pachón","Pachón", "Surface fish","Surface fish","Surface fish"),
+  stringsAsFactors = FALSE  # This ensures that text columns are not converted to factors
+)
+
+sampleinfo$Population <- factor(sampleinfo$Population, levels = c("Surface fish", "Pachón", "Molino"))
+
+pca_plot <- autoplot(pca_res, data = sampleinfo,  colour='Population', size=1.8
+                     #, frame = TRUE, frame.type = 'norm'
+                     )
+
+pca_plot <- pca_plot + 
+  scale_color_manual(values = pvg3)+
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +  # Add significance threshold
+  geom_vline(xintercept = 0, linetype = "dashed") + # Add foldchange threshold
+  theme_light()+
+  labs(title = "Proteomics - PCA plot") +
+  theme(text = element_text(size = 16)) +
+  theme(plot.title = element_text(hjust = 0.5, vjust = 0.5))  # Center the title
+
+pca_plot
+#Too few points to calculate an ellipse 
+
+#ggsave("output/vignette_run/median-norm/paper/Figure 2B Proteomics - PCA plot (median-norm).png", plot = pca_plot, width = 6, height = 4, units = "in")
+#ggsave("output/vignette_run/median-norm/paper/Figure 2B Proteomics - PCA plot (median-norm).svg", plot = pca_plot, width = 6, height = 4, units = "in")
+
+rm(normCounts,filtered_normCounts,log_data,pca_res,pca_plot,sampleinfo)
+```
+
+
+## SuppFig 2A Volcano plot
+
+```{r}
+vol_plot_pa_sf <-ggplot(annotDf_df, aes(x = `Pachón-Surface_fish_log2FoldChange`, y = -log10(`Pachón-Surface_fish_AdjPVal`))) +
+  geom_point(color = ifelse(
+    annotDf_df$`Pachón-Surface_fish_AdjPVal` < 0.05 &
+      annotDf_df$`Molino-Surface_fish_AdjPVal` < 0.05 & 
+      (annotDf_df$`Pachón-Surface_fish_log2FoldChange` > 0.5 &
+      annotDf_df$`Molino-Surface_fish_log2FoldChange` > 0.5) |
+      annotDf_df$`Pachón-Surface_fish_AdjPVal` < 0.05 &
+      annotDf_df$`Molino-Surface_fish_AdjPVal` < 0.05 &
+      (annotDf_df$`Pachón-Surface_fish_log2FoldChange` < -0.5 &
+      annotDf_df$`Molino-Surface_fish_log2FoldChange` < -0.5), "red",
+    "grey"), alpha = 0.6) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +  # Add significance threshold
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed") + # Add foldchange threshold
+  theme_light()+
+  labs(x = "Log2 Fold Change", y = "-log10(P adjusted)", title = "Pachón vs Surface fish") +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+vol_plot_pa_sf
+
+vol_plot_mo_sf <- ggplot(annotDf_df, aes(x = `Molino-Surface_fish_log2FoldChange`, y = -log10(`Molino-Surface_fish_AdjPVal`))) +
+  geom_point(color = ifelse(
+    annotDf_df$`Pachón-Surface_fish_AdjPVal` < 0.05 &
+      annotDf_df$`Molino-Surface_fish_AdjPVal` < 0.05 & 
+      (annotDf_df$`Pachón-Surface_fish_log2FoldChange` > 0.5 &
+      annotDf_df$`Molino-Surface_fish_log2FoldChange` > 0.5) |
+      annotDf_df$`Pachón-Surface_fish_AdjPVal` < 0.05 &
+      annotDf_df$`Molino-Surface_fish_AdjPVal` < 0.05 &
+      (annotDf_df$`Pachón-Surface_fish_log2FoldChange` < -0.5 &
+      annotDf_df$`Molino-Surface_fish_log2FoldChange` < -0.5), "red",
+    "grey"), alpha = 0.6) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +  # Add significance threshold
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed") + # Add foldchange threshold
+  theme_light()+
+  labs(x = "Log2 Fold Change", y = "-log10(P adjusted)", title = "Molino vs Surface fish") +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+vol_plot_mo_sf
+
+#ggsave("output/vignette_run/median-norm/paper/SuppFig 2A Pachón vs Surface fish - common genes highlighted.png", plot = vol_plot_pa_sf, width = 6, height = 4, units = "in")
+#ggsave("output/vignette_run/median-norm/paper/SuppFig 2A Pachón vs Surface fish - common genes highlighted.svg", plot = vol_plot_pa_sf, width = 6, height = 4, units = "in")
+#ggsave("output/vignette_run/median-norm/paper/SuppFig 2A Molino vs Surface fish - common genes highlighted.png", plot = vol_plot_mo_sf, width = 6, height = 4, units = "in")
+#ggsave("output/vignette_run/median-norm/paper/SuppFig 2A Molino vs Surface fish - common genes highlighted.svg", plot = vol_plot_mo_sf, width = 6, height = 4, units = "in")
+
+rm(vol_plot_mo_sf,vol_plot_pa_sf)
+```
+
+
+## 4.3 Heat map
+
+```{r}
+# info
+# For every KEGG pathways:
+# When we copied the whole list from the website, we need to replace two spaces ("  ") to "" in the gene ID session.
+```
+
+### 4.3.1 TCA cycle
+
+```{r}
+# use TCA cycle as an example
+# select specific genes in KEGG list
+# https://www.genome.jp/entry/pathway+amex00020
+
+tca <- read.csv("input/KEGG/Citrate cycle (TCA cycle) - Astyanax mexicanus (Mexican tetra).csv", header = F)
+
+
+tca_test <- left_join(tca,annotDf_df,by = c("V1"="gene_id"))
+tca_test <- na.omit(tca_test)
+
+rownames(tca_test) <- tca_test$V1
+tca_test<-tca_test[,11:19]
+
+colnames(tca_test) <- gsub("Abundance..", "",colnames(tca_test))
+colnames(tca_test) <- gsub("..Sample", "",colnames(tca_test))
+tca_test <- log2(tca_test)
+
+tca_test_1 <- expand.grid(gene.name = rownames(tca_test), individual_fish = colnames(tca_test))
+
+tca_test_1$value[tca_test_1$individual_fish == "F8..129C..Molino"] <- tca_test$F8..129C..Molino
+tca_test_1$value[tca_test_1$individual_fish == "F8..130N..Molino"] <- tca_test$F8..130N..Molino
+tca_test_1$value[tca_test_1$individual_fish == "F8..130C..Molino"] <- tca_test$F8..130C..Molino
+tca_test_1$value[tca_test_1$individual_fish == "F8..128N..Pachon"] <- tca_test$F8..128N..Pachon
+tca_test_1$value[tca_test_1$individual_fish == "F8..128C..Pachon"] <- tca_test$F8..128C..Pachon
+tca_test_1$value[tca_test_1$individual_fish == "F8..129N..Pachon"] <- tca_test$F8..129N..Pachon
+tca_test_1$value[tca_test_1$individual_fish == "F8..126..Surface"] <- tca_test$F8..126..Surface
+tca_test_1$value[tca_test_1$individual_fish == "F8..127N..Surface"] <- tca_test$F8..127N..Surface
+tca_test_1$value[tca_test_1$individual_fish == "F8..127C..Surface"] <- tca_test$F8..127C..Surface
+
+tca_test_z <- tca_test_1 %>%
+  group_by(gene.name) %>%
+  mutate(Z_Value = scale(value))
+
+
+# Create a matrix for clustering
+data_matrix <- dcast(tca_test_z, gene.name ~ individual_fish, value.var = "Z_Value")
+
+# Perform hierarchical clustering on rows
+row_dendrogram <- as.dendrogram(hclust(dist(data_matrix[, -1])))
+order_rows <- order.dendrogram(row_dendrogram)
+
+# Order the data frame according to the clustering
+tca_test_z$gene.name <- factor(tca_test_z$gene.name, levels = data_matrix$gene.name[order_rows])
+
+
+tca_test_heatmap <- ggplot(tca_test_z, aes(x = individual_fish, y = gene.name, fill = Z_Value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "darkblue", mid = "white", high = "darkred", midpoint = 0) +  # Set color gradient
+  labs(title = "Heatmap for TCA cycle genes", x = "Morph", y = "Gene", fill = "Z Value") + # Add labels
+  theme(plot.title = element_text(hjust = 0.5, vjust = 0.5, size = 15),
+        axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+        axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))
+
+
+tca_test_heatmap
+
+#ggsave("output/vignette_run/median-norm/median-norm-pathway-heatmaps/TCA cycles.png", plot = tca_test_heatmap, width = 12, height = 8, units = "in", dpi = 300)
+
+
+rm(tca,tca_test,tca_test_1,tca_test_z,tca_test_heatmap,data_matrix,row_dendrogram,order_rows)
+
+```
+
+### 4.3.2 Ribosome
+
+```{r}
+
+# select specific genes in KEGG list
+# https://www.genome.jp/entry/pathway+amex03050
+
+ribosome <- read.csv("input/KEGG/Ribosome - Astyanax mexicanus (Mexican tetra) amex03010.csv", header = F)
+
+
+ribosome_test <- left_join(ribosome,annotDf_df,by = c("V1"="gene_id"))
+ribosome_test <- na.omit(ribosome_test)
+
+# rownames(ribosome_test) <- ribosome_test$V1
+# will generate errors
+# Error in `.rowNamesDF<-`(x, value = value) : 
+#  duplicate 'row.names' are not allowed
+#In addition: Warning message:
+#non-unique value when setting 'row.names': ‘103037375’ 
+#ribosome_test<-ribosome_test[,11:19]
+
+# Create unique row names
+ribosome_test$RowName <- make.unique(as.character(ribosome_test$V1))
+
+# Set the new unique names as row names
+rownames(ribosome_test) <- ribosome_test$RowName
+ribosome_test<-ribosome_test[,11:19]
+
+
+colnames(ribosome_test) <- gsub("Abundance..", "",colnames(ribosome_test))
+colnames(ribosome_test) <- gsub("..Sample", "",colnames(ribosome_test))
+ribosome_test <- log2(ribosome_test)
+
+ribosome_test_1 <- expand.grid(gene.name = rownames(ribosome_test), individual_fish = colnames(ribosome_test))
+
+ribosome_test_1$value[ribosome_test_1$individual_fish == "F8..129C..Molino"] <- ribosome_test$F8..129C..Molino
+ribosome_test_1$value[ribosome_test_1$individual_fish == "F8..130N..Molino"] <- ribosome_test$F8..130N..Molino
+ribosome_test_1$value[ribosome_test_1$individual_fish == "F8..130C..Molino"] <- ribosome_test$F8..130C..Molino
+ribosome_test_1$value[ribosome_test_1$individual_fish == "F8..128N..Pachon"] <- ribosome_test$F8..128N..Pachon
+ribosome_test_1$value[ribosome_test_1$individual_fish == "F8..128C..Pachon"] <- ribosome_test$F8..128C..Pachon
+ribosome_test_1$value[ribosome_test_1$individual_fish == "F8..129N..Pachon"] <- ribosome_test$F8..129N..Pachon
+ribosome_test_1$value[ribosome_test_1$individual_fish == "F8..126..Surface"] <- ribosome_test$F8..126..Surface
+ribosome_test_1$value[ribosome_test_1$individual_fish == "F8..127N..Surface"] <- ribosome_test$F8..127N..Surface
+ribosome_test_1$value[ribosome_test_1$individual_fish == "F8..127C..Surface"] <- ribosome_test$F8..127C..Surface
+
+ribosome_test_z <- ribosome_test_1 %>%
+  group_by(gene.name) %>%
+  mutate(Z_Value = scale(value))
+
+
+# Create a matrix for clustering
+data_matrix <- dcast(ribosome_test_z, gene.name ~ individual_fish, value.var = "Z_Value")
+
+# Perform hierarchical clustering on rows
+row_dendrogram <- as.dendrogram(hclust(dist(data_matrix[, -1])))
+order_rows <- order.dendrogram(row_dendrogram)
+
+# Order the data frame according to the clustering
+ribosome_test_z$gene.name <- factor(ribosome_test_z$gene.name, levels = data_matrix$gene.name[order_rows])
+
+
+ribosome_test_heatmap <- ggplot(ribosome_test_z, aes(x = individual_fish, y = gene.name, fill = Z_Value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "darkblue", mid = "white", high = "darkred", midpoint = 0) +  # Set color gradient
+  labs(title = "Heatmap for ribosome genes", x = "Morph", y = "Gene", fill = "Z Value") + # Add labels
+  theme(plot.title = element_text(hjust = 0.5, vjust = 0.5, size = 15),
+        axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+        axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))
+
+
+ribosome_test_heatmap
+
+#ggsave("output/vignette_run/median-norm/median-norm-pathway-heatmaps/ribosome.png", plot = ribosome_test_heatmap, width = 18, height = 12, units = "in", dpi = 300)
+
+
+rm(ribosome,ribosome_test,ribosome_test_1,ribosome_test_z,ribosome_test_heatmap,data_matrix,row_dendrogram,order_rows)
+
+```
+
+
+### 4.3.3 Proteasome
+
+```{r}
+
+# select specific genes in KEGG list
+# https://www.genome.jp/entry/pathway+amex03050
+
+proteasome <- read.csv("input/KEGG/proteasome - Astyanax mexicanus (Mexican tetra).csv", header = F)
+
+
+proteasome_test <- left_join(proteasome,annotDf_df,by = c("V1"="gene_id"))
+proteasome_test <- na.omit(proteasome_test)
+
+# rownames(proteasome_test) <- proteasome_test$V1
+# will generate errors
+# Error in `.rowNamesDF<-`(x, value = value) : 
+#  duplicate 'row.names' are not allowed
+#In addition: Warning message:
+#non-unique value when setting 'row.names': ‘103037375’ 
+#proteasome_test<-proteasome_test[,11:19]
+
+# Create unique row names
+proteasome_test$RowName <- make.unique(as.character(proteasome_test$V1))
+
+# Set the new unique names as row names
+rownames(proteasome_test) <- proteasome_test$RowName
+proteasome_test<-proteasome_test[,11:19]
+
+
+colnames(proteasome_test) <- gsub("Abundance..", "",colnames(proteasome_test))
+colnames(proteasome_test) <- gsub("..Sample", "",colnames(proteasome_test))
+proteasome_test <- log2(proteasome_test)
+
+proteasome_test_1 <- expand.grid(gene.name = rownames(proteasome_test), individual_fish = colnames(proteasome_test))
+
+proteasome_test_1$value[proteasome_test_1$individual_fish == "F8..129C..Molino"] <- proteasome_test$F8..129C..Molino
+proteasome_test_1$value[proteasome_test_1$individual_fish == "F8..130N..Molino"] <- proteasome_test$F8..130N..Molino
+proteasome_test_1$value[proteasome_test_1$individual_fish == "F8..130C..Molino"] <- proteasome_test$F8..130C..Molino
+proteasome_test_1$value[proteasome_test_1$individual_fish == "F8..128N..Pachon"] <- proteasome_test$F8..128N..Pachon
+proteasome_test_1$value[proteasome_test_1$individual_fish == "F8..128C..Pachon"] <- proteasome_test$F8..128C..Pachon
+proteasome_test_1$value[proteasome_test_1$individual_fish == "F8..129N..Pachon"] <- proteasome_test$F8..129N..Pachon
+proteasome_test_1$value[proteasome_test_1$individual_fish == "F8..126..Surface"] <- proteasome_test$F8..126..Surface
+proteasome_test_1$value[proteasome_test_1$individual_fish == "F8..127N..Surface"] <- proteasome_test$F8..127N..Surface
+proteasome_test_1$value[proteasome_test_1$individual_fish == "F8..127C..Surface"] <- proteasome_test$F8..127C..Surface
+
+proteasome_test_z <- proteasome_test_1 %>%
+  group_by(gene.name) %>%
+  mutate(Z_Value = scale(value))
+
+
+# Create a matrix for clustering
+data_matrix <- dcast(proteasome_test_z, gene.name ~ individual_fish, value.var = "Z_Value")
+
+# Perform hierarchical clustering on rows
+row_dendrogram <- as.dendrogram(hclust(dist(data_matrix[, -1])))
+order_rows <- order.dendrogram(row_dendrogram)
+
+# Order the data frame according to the clustering
+proteasome_test_z$gene.name <- factor(proteasome_test_z$gene.name, levels = data_matrix$gene.name[order_rows])
+
+
+proteasome_test_heatmap <- ggplot(proteasome_test_z, aes(x = individual_fish, y = gene.name, fill = Z_Value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "darkblue", mid = "white", high = "darkred", midpoint = 0) +  # Set color gradient
+  labs(title = "Heatmap for proteasome genes", x = "Morph", y = "Gene", fill = "Z Value") + # Add labels
+  theme(plot.title = element_text(hjust = 0.5, vjust = 0.5, size = 20),
+        axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+        axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))
+
+
+proteasome_test_heatmap
+
+#ggsave("output/vignette_run/log2-norm-pathway-heatmaps/proteasome.png", plot = proteasome_test_heatmap, width = 12, height = 8, units = "in", dpi = 300)
+
+
+rm(proteasome,proteasome_test,proteasome_test_1,proteasome_test_z,proteasome_test_heatmap,data_matrix,row_dendrogram,order_rows)
+
+```
+
+
+
+
+### Figure 2C candidate genes
+
+```{r}
+# select specific genes in KEGG list
+# https://www.genome.jp/entry/pathway+amex00020
+
+# read up and down regulated proteins in cavefish compared to surface fish
+can_up <- read.csv("output/vignette_run/median-norm/DEG-analysis/annotated_upregulated in cavefish.csv")
+can_down <- read.csv("output/vignette_run/median-norm/DEG-analysis/annotated_downregulated in cavefish.csv")
+
+can <- rbind(can_up,can_down)
+
+# only select genes I mention in the main text
+can_test <- can[can$gene_name %in% c("decr1","acad11","gfpt1","tkta","tigarb","gmppb","cul3b","trim16","npepl1","pmpca","hint2","asrgl1","sarm1","agmat","slc12a9","npc1","jagn1b","rab10","rab1ab","timm8b","snx3","rpl5b","rpl18a","rpl31","rps12","rps16","rps27.1","eif4h","vars1","impdh1b"), ]
+
+# rab10 twice
+can_test[can_test$protein_id == "XP_007252241.1", "gene_name"] <- "rab10(1)"
+can_test[can_test$protein_id == "XP_007260521.1", "gene_name"] <- "rab10(2)"
+
+rownames(can_test) <- can_test$gene_name
+can_test <- can_test[,12:20]
+
+# Function to capitalize the first letter of a string (Protein name rules)
+capitalize_first <- function(x) {
+  substring(x, 1, 1) <- toupper(substring(x, 1, 1))
+  x
+}
+
+# Apply the function to all row names
+rownames(can_test) <- capitalize_first(rownames(can_test))
+
+# change name to standard names
+colnames(can_test) <- gsub("Abundance..", "",colnames(can_test))
+colnames(can_test) <- gsub("..Sample", "",colnames(can_test))
+colnames(can_test) <- gsub("F8..", "",colnames(can_test))
+
+colnames(can_test) <- gsub("126..Surface", "Surface fish.1",colnames(can_test))
+colnames(can_test) <- gsub("127N..Surface", "Surface fish.2",colnames(can_test))
+colnames(can_test) <- gsub("127C..Surface", "Surface fish.3",colnames(can_test))
+colnames(can_test) <- gsub("128N..Pachon", "Pachón.1",colnames(can_test))
+colnames(can_test) <- gsub("128C..Pachon", "Pachón.2",colnames(can_test))
+colnames(can_test) <- gsub("129N..Pachon", "Pachón.3",colnames(can_test))
+colnames(can_test) <- gsub("129C..Molino", "Molino.1",colnames(can_test))
+colnames(can_test) <- gsub("130N..Molino", "Molino.2",colnames(can_test))
+colnames(can_test) <- gsub("130C..Molino", "Molino.3",colnames(can_test))
+
+can_test <- log2(can_test)
+
+can_test_1 <- expand.grid(gene.name = rownames(can_test), individual_fish = colnames(can_test))
+
+can_test_1$value[can_test_1$individual_fish == "Molino.1"] <- can_test$Molino.1
+can_test_1$value[can_test_1$individual_fish == "Molino.2"] <- can_test$Molino.2
+can_test_1$value[can_test_1$individual_fish == "Molino.3"] <- can_test$Molino.3
+can_test_1$value[can_test_1$individual_fish == "Pachón.1"] <- can_test$Pachón.1
+can_test_1$value[can_test_1$individual_fish == "Pachón.2"] <- can_test$Pachón.2
+can_test_1$value[can_test_1$individual_fish == "Pachón.3"] <- can_test$Pachón.3
+can_test_1$value[can_test_1$individual_fish == "Surface fish.1"] <- can_test$`Surface fish.1`
+can_test_1$value[can_test_1$individual_fish == "Surface fish.2"] <- can_test$`Surface fish.2`
+can_test_1$value[can_test_1$individual_fish == "Surface fish.3"] <- can_test$`Surface fish.3`
+
+can_test_z <- can_test_1 %>%
+  group_by(gene.name) %>%
+  mutate(Z_Value = scale(value))
+
+
+# Create a matrix for clustering
+data_matrix <- dcast(can_test_z, gene.name ~ individual_fish, value.var = "Z_Value")
+
+# Perform hierarchical clustering on rows
+#row_dendrogram <- as.dendrogram(hclust(dist(data_matrix[, -1])))
+#order_rows <- order.dendrogram(row_dendrogram)
+
+# Order the data frame according to the clustering
+#can_test_z$gene.name <- factor(can_test_z$gene.name, levels = data_matrix$gene.name[order_rows])
+can_test_z$individual_fish <- factor(can_test_z$individual_fish, levels = c("Surface fish.1","Surface fish.2","Surface fish.3","Pachón.1","Pachón.2","Pachón.3","Molino.1","Molino.2","Molino.3"))
+can_test_z$gene.name <- factor(can_test_z$gene.name, levels = rev(c("Decr1","Acad11","Gfpt1","Tkta","Tigarb","Gmppb","Cul3b","Trim16","Npepl1","Pmpca","Hint2","Asrgl1","Sarm1","Agmat","Slc12a9","Npc1","Jagn1b","Rab10(1)","Rab10(2)","Rab1ab","Timm8b","Snx3","Rpl5b","Rpl18a","Rpl31","Rps12","Rps16","Rps27.1","Eif4h","Vars1","Impdh1b")))
+
+can_test_heatmap <- ggplot(can_test_z, aes(x = individual_fish, y = gene.name, fill = Z_Value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "darkblue", mid = "white", high = "darkred", midpoint = 0) +  # Set color gradient
+  theme_bw()+
+  labs(title = "Heatmap of candidate genes", x = "Population", y = "Gene", fill = "Z Value") + # Add labels
+  theme(plot.title = element_text(hjust = 0.5, vjust = 0.5, size = 15),
+        axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+        axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15))
+
+
+can_test_heatmap
+
+#ggsave("output/vignette_run/median-norm/paper/Figure 2C heatmap of candidate genes.png", plot = can_test_heatmap, width = 5, height = 6, units = "in", dpi = 300)
+#ggsave("output/vignette_run/median-norm/paper/Figure 2C heatmap of candidate genes.svg", plot = can_test_heatmap, width = 5, height = 6, units = "in", dpi = 300)
+
+rm(can_up,can_down,can,can_test,can_test_1,can_test_z,can_test_heatmap,data_matrix,row_dendrogram,order_rows)
+```
+
+## 4.4 Bar plot for specific gene
+
+### SuppFig 2B cbsa
+
+```{r}
+
+cbsa <- na.omit(annotDf_df[annotDf_df$gene_id == "103027202", 10:18])
+
+cbsa_df <- data.frame(
+  Population = rep(c("Molino", "Pachón", "Surface fish"), each = 3),
+  Replicate = rep(c("Rep1", "Rep2", "Rep3"), times = 3),
+  Value = as.numeric(as.character(cbsa))
+)
+
+cbsa_df$Population <- factor(cbsa_df$Population, levels = c("Surface fish", "Pachón", "Molino"))
+
+box <- ggplot(cbsa_df, aes(x = Population, y = Value, fill = Population)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_manual(values = pvg3) +
+  geom_point(aes(x = Population), shape = 21, position = position_jitterdodge(dodge.width = 0.9)) +
+  # Mannually add comparison and p value
+  geom_segment(
+    aes(x = 1, xend = 2, y = max(cbsa_df$Value) + 0.5, yend = max(cbsa_df$Value) + 0.5),
+    color = "black", size = 1,
+    inherit.aes = FALSE,
+    data = data.frame(p.value = annotDf_df[annotDf_df$gene_id == "103027202", "Pachón-Surface_fish_AdjPVal"][1])) + # PA vs SF
+  geom_segment(
+    aes(x = 1, xend = 3, y = max(cbsa_df$Value) + 1, yend = max(cbsa_df$Value) + 1),
+    color = "black", size = 1,
+    inherit.aes = FALSE,
+    data = data.frame(p.value = annotDf_df[annotDf_df$gene_id == "103027202", "Molino-Surface_fish_AdjPVal"][1])) + # MO vs SF
+  
+  annotate(
+    "text",
+    x = 1.5,
+    y = max(cbsa_df$Value) + 0.6,
+    label = paste("p = ", format.pval(annotDf_df[annotDf_df$gene_id == "103027202", "Pachón-Surface_fish_AdjPVal"][1], digits = 2)),
+    hjust = 0.5, vjust = 0,
+    size = 4, color = "black") + # PA vs SF
+  annotate(
+    "text",
+    x = 2,
+    y = max(cbsa_df$Value) + 1.1,
+    label = paste("p = ", format.pval(annotDf_df[annotDf_df$gene_id == "103027202", "Molino-Surface_fish_AdjPVal"][1], digits = 2)),
+    hjust = 0.5, vjust = 0,
+    size = 4, color = "black") + # MO vs SF
+  theme_minimal() +
+  # HOW TO MAKE IT ITALIC
+  #ylab(expression("" * italic("cbsa") * " protein normalized abundance")) +
+  ylab(expression("Cbsa normalized protein abundance")) +
+  labs(title = "cbsa protein abundance in 2-cell stage embryos") +
+  theme(text = element_text(size = 16)) +
+  theme(plot.title = element_text(hjust = 0.5))  # Center the title
+
+box
+
+#ggsave("output/vignette_run/median-norm/paper/SuppFig 2B cbsa protein abundance in 2-cell stage embryos.png", plot = box, width = 6, height = 6, units = "in")
+#ggsave("output/vignette_run/median-norm/paper/SuppFig 2B cbsa protein abundance in 2-cell stage embryos.svg", plot = box, width = 6, height = 6, units = "in")
+
+rm(cbsa, cbsa_df, box)
+```
+
+### SuppFig 2B fastmyhc
+
+```{r}
+
+fastmyhc <- na.omit(annotDf_df[annotDf_df$gene_id == "103043447", 10:18])
+
+fastmyhc_df <- data.frame(
+  Population = rep(c("Molino", "Pachón", "Surface fish"), each = 3),
+  Replicate = rep(c("Rep1", "Rep2", "Rep3"), times = 3),
+  Value = as.numeric(as.character(fastmyhc))
+)
+
+fastmyhc_df$Population <- factor(fastmyhc_df$Population, levels = c("Surface fish", "Pachón", "Molino"))
+
+box <- ggplot(fastmyhc_df, aes(x = Population, y = Value, fill = Population)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_manual(values = pvg3) +
+  geom_point(aes(x = Population), shape = 21, position = position_jitterdodge(dodge.width = 0.9)) +
+  # Mannually add comparison and p value
+  geom_segment(
+    aes(x = 1, xend = 2, y = max(fastmyhc_df$Value) + 0.25, yend = max(fastmyhc_df$Value) + 0.25),
+    color = "black", size = 1,
+    inherit.aes = FALSE,
+    data = data.frame(p.value = annotDf_df[annotDf_df$gene_id == "103043447", "Pachón-Surface_fish_AdjPVal"][3])) + # PA vs SF
+  geom_segment(
+    aes(x = 1, xend = 3, y = max(fastmyhc_df$Value) + 0.5, yend = max(fastmyhc_df$Value) + 0.5),
+    color = "black", size = 1,
+    inherit.aes = FALSE,
+    data = data.frame(p.value = annotDf_df[annotDf_df$gene_id == "103043447", "Molino-Surface_fish_AdjPVal"][3])) + # MO vs SF
+  
+  annotate(
+    "text",
+    x = 1.5,
+    y = max(fastmyhc_df$Value) + 0.3,
+    label = paste("p = ", format.pval(annotDf_df[annotDf_df$gene_id == "103043447", "Pachón-Surface_fish_AdjPVal"][3], digits = 2)),
+    hjust = 0.5, vjust = 0,
+    size = 4, color = "black") + # PA vs SF
+  annotate(
+    "text",
+    x = 2,
+    y = max(fastmyhc_df$Value) + 0.55,
+    label = paste("p = ", format.pval(annotDf_df[annotDf_df$gene_id == "103043447", "Molino-Surface_fish_AdjPVal"][3], digits = 2)),
+    hjust = 0.5, vjust = 0,
+    size = 4, color = "black") + # MO vs SF
+  theme_minimal() +
+  ylab(expression("Fast myhc normalized protein abundance")) +
+  labs(title = "Fast myhc protein abundance in 2-cell stage embryos") +
+  theme(text = element_text(size = 16)) +
+  theme(plot.title = element_text(hjust = 0.5))  # Center the title
+
+box
+
+#ggsave("output/vignette_run/median-norm/paper/SuppFig 2B fastmyhc protein abundance in 2-cell stage embryos.png", plot = box, width = 6, height = 6, units = "in")
+#ggsave("output/vignette_run/median-norm/paper/SuppFig 2B fastmyhc protein abundance in 2-cell stage embryos.svg", plot = box, width = 6, height = 6, units = "in")
+
+rm(fastmyhc, fastmyhc_df, box)
+```
+
+# SessionInfo
+
+```{r}
+sessionInfo()
+```
