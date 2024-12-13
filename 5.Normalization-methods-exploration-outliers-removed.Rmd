@@ -1,7 +1,6 @@
 ---
 title: 'Lipidomics analysis'
 author: "Fanning Xia"
-date: "2024-04-16"
 output: html_document
 editor_options: 
   chunk_output_type: console
