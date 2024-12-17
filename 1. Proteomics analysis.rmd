@@ -1,0 +1,573 @@
+---
+title: "proteomics-analysis"
+author: "Fanning Xia"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# 0. Preparation work
+## Load, filter the data and create sample info
+
+```{r}
+# load packages
+library(NormalyzerDE)
+library(preprocessCore)
+library(ggplot2)
+library(dplyr)
+library(UniprotR)
+library(rentrez)
+library(reshape2)
+library(dendextend)
+library(biomaRt)
+library(ggfortify)
+library(cluster)
+library(tidyr)
+library(ggsci)
+library(scales)
+library(car)
+library(FSA)
+library(svglite)
+
+pvg3 <- c("#979FA2","#EE9B00","#93D2DF")
+```
+
+```{r}
+# set working directory
+setwd("/Volumes/projects/fx2482/proteomics-2cellstage/")
+
+# load data for heatmap
+counts <- read.csv("input/raw_norm_Am_cavefish-embryo_WCE_PROT941-TMT9_hph_neo_125min_2.csv")
+counts <- counts[, c(4:5,8,30:66)]
+
+# remove Contaminant
+valid_counts <- counts[!grepl("^Contaminant_", counts$Accession),]
+
+# remove other parameters, just keep raw counts
+rownames(valid_counts) <- valid_counts[,1]
+
+ms_normcounts <- valid_counts[,23:31] # normalized counts from Mass Spec core
+valid_counts <- valid_counts[,14:22] # raw counts
+
+# check if there's any NA not in the entire row
+rows_with_partial_NAs <- valid_counts[rowSums(is.na(valid_counts)) > 0 & rowSums(!is.na(valid_counts)) > 0, ]
+rows_with_partial_NAs #results show no partial NAs, we can remove this parameter
+rm(rows_with_partial_NAs)
+
+# remove all lines with NA 
+valid_counts <- na.omit(valid_counts)
+ms_normcounts <- na.omit(ms_normcounts)
+
+# find unique rows, need to remove the rows with exact same value in every columns (remove repetitive rows)
+# Initally I want to use PEP score to keep unique rows, but PEP score is not necessarily correlated with unique names
+# unique_counts <- counts[!duplicated(counts$Sum.PEP.Score), ]
+
+unique_counts <- unique(valid_counts)
+ms_normcounts <- unique(ms_normcounts)
+
+#unique_counts[unique_counts ==  0] <- 1 # was trying to change it to 0.01, but it will have an error during log normalization. I will check eventually if there is one gene differentially expressed with this artifical 1
+
+#write.table(unique_counts, file='input/prep_normDE_counts.tsv', quote=FALSE, sep='\t', col.names = NA)
+#write.table(rownames(unique_counts)[grep("^XP|^NP", rownames(unique_counts))], file='input/prep_normDE_XP_ID.tsv', quote=FALSE, sep='\t', col.names = NA)
+#write.table(rownames(unique_counts)[grep("^KAG", rownames(unique_counts))], file='input/prep_normDE_KAG_ID.tsv', quote=FALSE, sep='\t', col.names = NA)
+
+
+# create a sample info table
+sampleinfo <- data.frame(
+  sample = colnames(unique_counts),
+  group = c("Molino","Molino","Molino", "Pachón","Pachón","Pachón", "Surface_fish","Surface_fish","Surface_fish"),
+  stringsAsFactors = FALSE  # This ensures that text columns are not converted to factors
+)
+
+#write.table(sampleinfo, file='input/prep_normDE_sampleinfo.tsv', quote=FALSE, sep='\t', col.names = NA)
+
+```
+
+
+# 1. Normalization methods
+
+Used NormalyzerDE
+
+Paper: NormalyzerDE: Online Tool for Improved Normalization of Omics Expression Data and High-Sensitivity Differential Expression Analysis
+https://pubs.acs.org/doi/10.1021/acs.jproteome.8b00523
+
+Package: Evaluation and statistics of expression data using NormalyzerDE
+https://www.bioconductor.org/packages/release/bioc/vignettes/NormalyzerDE/inst/doc/vignette.html#stepwise-processing-normalization-part
+
+## 1.1 Running NormalyzerDE evaluation
+
+```{r}
+# 1. load data
+jobName <- "vignette_run"
+designFp <- "/Volumes/projects/fx2482/proteomics-2cellstage/input/prep_normDE_sampleinfo.tsv"
+dataFp <- "/Volumes/projects/fx2482/proteomics-2cellstage/input/prep_normDE_counts.tsv"
+
+experimentObj <- setupRawDataObject(dataFp, designFp, "default", TRUE, "sample", "group")
+normObj <- getVerifiedNormalyzerObject(jobName, experimentObj)
+
+# 2. generate normalizations
+normResults <- normMethods(normObj)
+
+# 3. generate performance measures
+normResultsWithEval <- analyzeNormalizations(normResults)
+
+# 4. output matrices to file
+jobDir <- setupJobDir("vignette_run", "/Volumes/projects/fx2482/proteomics-2cellstage/output/")
+#writeNormalizedDatasets(normResultsWithEval, jobDir)
+
+# 5. generate evaluation plots
+#generatePlots(normResultsWithEval, jobDir)
+
+rm(jobName, dataFp, experimentObj,normObj,normResults,normResultsWithEval)
+
+```
+
+## 1.2 Median normalization - Differential expression analysis
+
+```{r}
+# 1. Setup folders and data matrices
+
+bestNormMatPath <- paste(jobDir, "median-normalized.txt", sep="/")
+experimentObj <- setupRawContrastObject(bestNormMatPath, designFp, "sample")
+nst <- NormalyzerStatistics(experimentObj, logTrans=FALSE)
+
+# 2. Calculate statistics
+# Now we are ready to perform the contrasts. Contrasts are provided as a vector in the format c("condA-condB", "condB-condC"), where condX is the group levels.
+
+comparisons <- c("Molino-Surface_fish", "Pachón-Surface_fish")
+nst <- calculateContrasts(nst, comparisons, condCol="group", leastRepCount=2)
+
+# 3. Generate final matrix and output
+annotDf <- generateAnnotatedMatrix(nst)
+jobDir <- setupJobDir("DEG-analysis", "/Volumes/projects/fx2482/proteomics-2cellstage/output/vignette_run/median-norm/")
+#write.csv(annotDf, file=paste(jobDir, "stat_table.csv", sep="/"))
+#generateStatsReport(nst, "Vignette stats", jobDir)
+
+rm(bestNormMatPath,experimentObj,nst,comparisons)
+```
+
+## 1.3 Annotation: transfer protein ID to entrez ID (NCBI gene ID)
+version (not entirely sure, mostly should be AstMex_SF_3)
+https://www.ncbi.nlm.nih.gov/datasets/genome/?taxon=7994
+
+
+### 1.3.1 For XP protein ids - rentrez
+
+```{r}
+# load rentrez package to interact with the NCBI E-utilities
+library(rentrez)
+
+# Define a vector of protein IDs
+protein_ids <- rownames(unique_counts)[grep("^XP|^NP", rownames(unique_counts))]
+
+# Define the database to query (e.g., 'gene' for Entrez Gene)
+database <- "gene"
+
+# Function to convert protein IDs to Entrez Gene IDs
+convert_protein_ids <- function(protein_ids, database = "gene") {
+  # Initialize a list to store results
+  gene_ids <- vector("list", length = length(protein_ids))
+  
+  # Loop over each protein ID
+  for (i in seq_along(protein_ids)) {
+    # Construct the query
+    query <- paste(protein_ids[i], "[Accession]", sep = " ")
+    
+    # Perform the search
+    search_results <- entrez_search(db = database, term = query)
+    
+    # Extract the Entrez Gene ID from the search results
+    if (search_results$count > 0) {
+      gene_ids[[i]] <- search_results$ids[1]
+    } else {
+      gene_ids[[i]] <- NA
+    }
+  }
+  
+  # Return the list of Entrez Gene IDs
+  return(gene_ids)
+}
+
+# Convert protein IDs to Entrez Gene IDs
+entrez_gene_ids <- convert_protein_ids(protein_ids, database) 
+
+# Print the results
+for (i in seq_along(protein_ids)) {
+  cat("Protein ID:", protein_ids[i], "corresponds to Entrez Gene ID:", entrez_gene_ids[[i]], "\n")
+}
+
+# get the unlist result
+annotDf_gene <- data.frame(
+  protein_id = protein_ids,
+  gene_id = unlist(entrez_gene_ids),
+  stringsAsFactors = FALSE  # This ensures that text columns are not converted to factors
+)
+
+#write.csv(annotDf_gene,"output/vignette_run/annotation/XPandNP_protein_to_gene_annotation.csv", sep="/"))
+
+rm(protein_ids,database)
+
+```
+
+### 1.3.2 For KAG protein ids
+
+```{r}
+
+# first get old mapping from MS core / ThermoFisher
+
+counts <- read.csv("input/raw_norm_Am_cavefish-embryo_WCE_PROT941-TMT9_hph_neo_125min_2.csv")
+rownames(counts) <- counts$Accession
+
+protein_ids_KAG <- rownames(unique_counts)[grep("^KAG", rownames(unique_counts))]
+protein_KAG <- counts[protein_ids_KAG,]
+
+test <- protein_KAG[,c(4,22,24,25)]
+test$Gene.Symbol <- tolower(test$Gene.Symbol) #get them into lower case
+
+
+```
+
+#### 1.3.2.1 Use biomaRt to find gene ids
+
+```{r}
+
+ensembl <- useEnsembl(biomart = "ensembl",
+                       dataset = "amexicanus_gene_ensembl",
+                       mirror = "useast")
+
+filters <- listFilters(ensembl)
+grep("XP_", filters$description, value = TRUE, ignore.case = TRUE)
+grep("KAG", filters$description, value = TRUE, ignore.case = TRUE)
+grep("ENS", filters$description, value = TRUE, ignore.case = TRUE)
+
+test.1 <- getBM(attributes = c("entrezgene_id","entrezgene_accession"),
+                          filters = "entrezgene_accession",
+                          values = test$Gene.Symbol,
+                          mart = ensembl)
+test.2 <- left_join(test, test.1, by = c("Gene.Symbol" = "entrezgene_accession"))
+
+# then ony keep one lane once we found each conditions
+# find common annotated rows between pd annotation and our annotation
+test.3 <- test.2[test.2$Entrez.Gene.ID == test.2$entrezgene_id,]
+test.3 <- na.omit(test.3)
+test.3 <- test.3[,c(1:4)]
+
+# find annotated rows only in new mapping
+test.4 <- test.2[test.2$Entrez.Gene.ID == "" & !is.na(test.2$entrezgene_id),]
+test.4$Entrez.Gene.ID <- test.4$entrezgene_id
+test.4 <- test.4[,c(1:4)]
+
+# find annotated rows only in original mapping
+test.5 <- test.2[!test.2$Entrez.Gene.ID == "" & is.na(test.2$entrezgene_id),]
+test.5 <- test.5[,c(1:4)]
+
+# find annotated rows with different values
+test.6 <- test.2[!test.2$Entrez.Gene.ID == "" & !is.na(test.2$entrezgene_id) & test.2$Entrez.Gene.ID != test.2$entrezgene_id,]
+test.6 <- test.6[,c(1:4)] #by manual check, originally mapped ones were correct (mostly)
+
+# all unannotated ones
+test.7 <- test.2[test.2$Entrez.Gene.ID == "" & is.na(test.2$entrezgene_id),]
+test.7 <- test.7[,c(1:4)]
+
+annoDF_protein_KAG <- rbind(test.3,test.4,test.5,test.6)
+rm(test,test.1,test.2,test.3,test.4,test.5,test.6)
+```
+
+#### 1.3.2.2 Use rentrez to find gene ids
+
+```{r}
+# Define a vector of leftover genes unannotated in test.7
+gene_names <- test.7$Gene.Symbol
+
+# Define the database to query (e.g., 'gene' for Entrez Gene)
+database <- "gene"
+
+# Function to convert pd annotated gene names IDs to Entrez Gene IDs
+convert_gene_names <- function(gene_names, database = "gene") {
+  # Initialize a list to store results
+  gene_ids <- vector("list", length = length(gene_names))
+  
+  # Loop over each gene_names
+  for (i in seq_along(gene_names)) {
+    # Construct the query
+    query <- paste(gene_names[i], "[Gene Name] AND", 7994, "[Taxonomy ID]", sep = " ")
+    
+    # Perform the search
+    search_results <- entrez_search(db = database, term = query)
+    
+    # Extract the Entrez Gene ID from the search results
+    if (search_results$count > 0) {
+      gene_ids[[i]] <- search_results$ids[1]
+    } else {
+      gene_ids[[i]] <- NA
+    }
+  }
+  
+  # Return the list of Entrez Gene IDs
+  return(gene_ids)
+}
+
+# Convert protein IDs to Entrez Gene IDs
+geneid_based_on_gene_names <- convert_gene_names(gene_names, database)
+
+test.7$Entrez.Gene.ID <- unlist(geneid_based_on_gene_names)
+
+# combine it 
+annoDF_protein_KAG <- rbind(annoDF_protein_KAG, test.7[complete.cases(test.7) & test.7$Gene.Symbol != "",])
+
+rm(database)
+```
+
+#### 1.3.2.3 Manual annotation
+
+```{r}
+# find final rows without any annotations
+test.8 <- test.7[!complete.cases(test.7) | test.7$Gene.Symbol == "",]
+
+#mannual annotation
+test.8$Entrez.Gene.ID <- c("103033944", "103045882", "103046345","103034887","111190432",
+                           "103029774", "","103047682","103022465","103046426",
+                           "103039390", "103028412", "107197318", "103025840","103038803",
+                           "111192975", "103034887", "103039618","103045988","103046720",
+                           "111191983", "103037668", "103042293", "103035393", "103023629",
+                           "103022532", "103027693", "103034296", "103036175", "103033541",
+                           "103040660", "103025109", "103034086", "103027409", "103022177",
+                           "103047533", "103037884", "103041583", "103024822", "103034233",
+                           "103023892", "107197708", "","103028044", "125806057",
+                           "111188250", "103046166", "103024139", "103036797", "103022403",
+                           "103041044", "103022710", "111193015", "103026176", "103026776",
+                           "111196314", "111197585", "103028468", "111191983", "103024037",
+                           "103026173", "103045882", "103046193", "103029047", "103028685",
+                           "111195933"
+                           )
+annoDF_protein_KAG <- rbind(annoDF_protein_KAG, test.8)
+#write.csv("output/vignette_run/annotation/KAG_protein_to_gene_annotation.csv", sep="/"))
+
+rm(test.7,test.8)
+```
+
+### 1.3.3 Get the full annotation for all unique protein findings
+
+```{r}
+# make all annotations regardless of XP_ or KAG the same
+# load annotations
+
+ann_XP <- read.csv("output/vignette_run/annotation/XPandNP_protein_to_gene_annotation.csv")
+ann_KAG <- read.csv("output/vignette_run/annotation/KAG_protein_to_gene_annotation.csv")
+
+ann_XP <- ann_XP[,2:3]
+ann_KAG <- ann_KAG[,2:3]
+colnames(ann_KAG) <- colnames(ann_XP)
+
+anno_all <- rbind(ann_KAG,ann_XP)
+
+#write.csv(anno_all, "output/vignette_run/annotation/unique_protein_to_gene_annotation.csv")
+
+library(dplyr)
+annotDf_df <- left_join(anno_all, annotDf, c("protein_id"="V1"))
+annotDf_df$gene_id <- as.integer(annotDf_df$gene_id)
+
+#write.csv(annotDf_df, "output/vignette_run/median-norm/DEG-analysis/All_protein_to_gene_annotation.csv")
+
+rm(ann_XP,ann_KAG,anno_all)
+
+```
+
+### 1.3.4 Transfer NCBI gene ID into gene names
+
+```{r}
+
+ncbi_ids <- annotDf_df$gene_id
+
+# Define the database to query (e.g., 'gene' for Entrez Gene)
+database <- "gene"
+
+# Function to convert Entrez Gene IDs to gene names
+fetch_gene_names <- function(ncbi_ids, taxonomy_id = 7994, database = "gene") {
+  # Initialize a vector to store results
+  gene_names <- vector("character", length = length(ncbi_ids))
+  
+  # Loop over each gene ID
+  for (i in seq_along(ncbi_ids)) {
+    # Construct the query: match Gene ID and taxonomy ID
+    query <- paste0(ncbi_ids[i], "[UID] AND ", taxonomy_id, "[Taxonomy ID]")
+    cat("Searching for:", query, "\n")  # Debugging output
+    
+    # Perform the search
+    search_results <- tryCatch(
+      entrez_search(db = database, term = query),
+      error = function(e) return(NULL)
+    )
+    
+    # Extract the Gene Name from the search results
+    if (!is.null(search_results) && search_results$count > 0) {
+      gene_summary <- tryCatch(
+        entrez_summary(db = database, id = search_results$ids[1]),
+        error = function(e) return(NULL)
+      )
+      
+      if (!is.null(gene_summary)) {
+        gene_names[i] <- gene_summary$name  # Get gene symbol/name
+      } else {
+        gene_names[i] <- NA
+      }
+    } else {
+      gene_names[i] <- NA  # Return NA if no result found
+    }
+  }
+  
+  # Return the vector of gene names
+  return(gene_names)
+}
+
+# Convert Entrez Gene IDs to gene names
+gene_names_conversion <- fetch_gene_names(ncbi_ids)
+
+# Combine into a data frame
+results <- data.frame(NCBI_ID = ncbi_ids, Gene_Name = gene_names_conversion)
+
+# View the results
+print(results)
+
+# Combine it with original files
+full_annotDf_df <- merge(results, annotDf_df, by.x = "NCBI_ID", by.y = "gene_id")
+full_annotDf_df <- unique(full_annotDf_df)
+
+#write.csv(results, "output/vignette_run/median-norm/DEG-analysis/Conversion_NCBI_ID_names.csv")
+#write.csv(full_annotDf_df, "output/vignette_run/median-norm/DEG-analysis/Annotated_NCBI_ID_names_All_protein_to_gene_annotation.csv")
+
+rm(ncbi_ids,database,search_results,results,gene_names_conversion,query)
+```
+
+
+
+# 2. Check if two collection methods are well separated
+
+All surface fish samples were collected through "natural spawning (NS)", and all Molino cavefish samples were collected through night IVF. In Pachón samples, 128N was collected by NS and 128C and 129N were by IVF. This is to test if the collection methods would affect the comparisons especially for Molino and surface fish.
+
+```{r}
+# Comparison as a whole
+
+# comparison data creation
+
+df <- annotDf_df[,c(2,13:15)]
+
+# Reshaping data to long format
+long_df <- pivot_longer(df, cols = -gene_id, names_to = "Sample", values_to = "Value")
+long_df <- long_df %>%
+  mutate(Method = case_when(
+    Sample %in% "Abundance..F8..128N..Sample..Pachon" ~ "NS", 
+    Sample %in% c("Abundance..F8..128C..Sample..Pachon", "Abundance..F8..129N..Sample..Pachon") ~ "IVF"
+  ))
+
+# Check normality for each group
+ggplot(long_df, aes(sample = Value)) +
+  facet_wrap(~ Method) +
+  stat_qq() +
+  stat_qq_line() +
+  theme_minimal() +
+  labs(title = "Q-Q Plots by Method") # They are not normally distributed
+
+by(long_df$Value, long_df$Method, shapiro.test) # not normally distributed
+
+# Check homogeneity of variances (Levene's Test)
+leveneTest(Value ~ Method, data = long_df) # not homogeneous
+
+# Perform Mann-Whitney U test
+wilcox.test(Value ~ Method, data = long_df) # non-significant
+
+rm(df,long_df)
+```
+
+```{r}
+# Comparison individually
+
+df <- annotDf_df[,c(2,13:15)]
+df <- na.omit(df)
+
+# Create an empty vector to store p-values
+p_values <- numeric(nrow(df))
+
+# Loop through each row/gene
+for (i in 1:nrow(df)) {
+  # Subset data for the current row/gene
+  data_row <- df[i, ]
+  
+  # Subset data based on the method of collection
+  data_method_ns <- data_row[colnames(data_row) == "Abundance..F8..128N..Sample..Pachon"]
+  data_method_ivf <- data_row[colnames(data_row) %in% c("Abundance..F8..128C..Sample..Pachon", "Abundance..F8..129N..Sample..Pachon")]
+  
+  # Perform t-test
+  t_test_result <- t.test(data_method_ivf, mu = data_method_ns$Abundance..F8..128N..Sample..Pachon)
+  
+  # Extract p-value and store it
+  p_values[i] <- t_test_result$p.value
+}
+
+df$p.value <- p_values
+df$p.adj <- p.adjust(df$p.value, method = "BH")
+
+# print any significant expressed gene names
+print(df[df$p.adj < 0.05, ])
+
+rm(i,df,p_values,data_row,data_method_ns,data_method_ivf,t_test_result)
+```
+
+Conclusion for this: generally, the collection method might not impact the results. Only 2 genes were found significantly affected by the methods. I will need to keep these two in mind if anything pop up in the final result. They are: "eif3hb" and "gemin7"
+
+# 3. Get results from DEG analysis
+
+## Some parameters
+
+```{r}
+# How many unique gene ID?
+length(unique(annotDf_df$gene_id))
+```
+
+```{r}
+# How many percentage of vtgs? (an estimate)
+
+# Find all vtgs (used ms annotations, I need to talk to Di about all annotations of shinyapps)
+
+df <- annotDf_df
+rownames(df) <- df$protein_id
+df <- df[,10:18]
+df = 2^df
+df[is.na(df)] <- 0
+
+sum(df[rownames(df) %in% c("XP_022535137.2","XP_049320372.1","XP_049321622.1","XP_022525474.2","XP_049321621.1","KAG9266789.1","XP_049321630.1","KAG9266788.1","XP_007233218.3","KAG9266776.1","XP_022532042.2"), ])/sum(df)
+```
+
+## DEG analysis
+
+```{r}
+full_annotDf_df <- read.csv("output/vignette_run/median-norm/DEG-analysis/Annotated_NCBI_ID_names_All_protein_to_gene_annotation.csv")
+full_annotDf_df <- full_annotDf_df[,2:20]
+
+up_cav <- full_annotDf_df[full_annotDf_df$`Molino-Surface_fish_AdjPVal` < 0.05 & full_annotDf_df$`Pachón-Surface_fish_AdjPVal` < 0.05 & full_annotDf_df$`Molino-Surface_fish_log2FoldChange` > 0.5 & full_annotDf_df$`Pachón-Surface_fish_log2FoldChange` >0.5, ]
+
+up_pa <- full_annotDf_df[full_annotDf_df$`Pachón-Surface_fish_AdjPVal` < 0.05 & full_annotDf_df$`Pachón-Surface_fish_log2FoldChange` >0.5, ]
+
+up_mo <- full_annotDf_df[full_annotDf_df$`Molino-Surface_fish_AdjPVal` < 0.05 & full_annotDf_df$`Molino-Surface_fish_log2FoldChange` > 0.5, ]
+
+down_cav <- full_annotDf_df[full_annotDf_df$`Molino-Surface_fish_AdjPVal` < 0.05 & full_annotDf_df$`Pachón-Surface_fish_AdjPVal` < 0.05 & full_annotDf_df$`Molino-Surface_fish_log2FoldChange` < -0.5 & full_annotDf_df$`Pachón-Surface_fish_log2FoldChange` < -0.5, ]
+
+down_pa <- full_annotDf_df[full_annotDf_df$`Pachón-Surface_fish_AdjPVal` < 0.05 & full_annotDf_df$`Pachón-Surface_fish_log2FoldChange` < -0.5, ]
+
+down_mo <- full_annotDf_df[full_annotDf_df$`Molino-Surface_fish_AdjPVal` < 0.05 & full_annotDf_df$`Molino-Surface_fish_log2FoldChange` < -0.5, ]
+
+#write.csv(up_cav, file=paste(jobDir, "annotated upregulated in cavefish.csv", sep="/"))
+#write.csv(down_cav, file=paste(jobDir, "annotated downregulated in cavefish.csv", sep="/"))
+#write.csv(up_pa, file=paste(jobDir, "annotated upregulated in Pachón.csv", sep="/"))
+#write.csv(up_mo, file=paste(jobDir, "annotated upregulated in Molino.csv", sep="/"))
+#write.csv(down_pa, file=paste(jobDir, "annotated downregulated in Pachón.csv", sep="/"))
+#write.csv(down_mo, file=paste(jobDir, "annotated downregulated in Molino.csv", sep="/"))
+
+rm(up_cav,down_cav,up_pa,up_mo,down_pa,down_mo)
+```
+
+# SessionInfo
+
+```{r}
+sessionInfo()
+```
