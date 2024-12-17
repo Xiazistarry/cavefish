@@ -1,0 +1,426 @@
+---
+title: "MOLNG-3908-analysis"
+author: "Fanning Xia"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# 0. Preparation
+
+```{r}
+
+setwd("/n/projects/fx2482/Bulk-RNA-seq/MOLNG-3908/")
+
+library(edgeR)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(ggfortify)
+library(cluster)
+library(vangogh)
+# load color
+library("ggsci")
+library("scales")
+
+pvg12 <- c("#BE95C4","#9F86C0","#5E548E","#231942","#E9D8A6","#EE9B00","#CA6702","#E85D04","#ADE8F4","#48CAE4","#0096C7","#023E8A")
+
+pvg9 <- c("#5E548E","#9F86C0","#BE95C4","#CA6702","#EE9B00","#E9D8A6","#0096C7","#48CAE4","#ADE8F4")
+
+pvg3 <- c("#979FA2","#EE9B00","#93D2DF")
+
+```
+
+# 1. Read data and cleanup the data
+
+```{r}
+counts <- read.csv("/n/core/Bioinformatics/secondary/Rohner/fx2482/MOLNG-3908.Astyanax_mexicanus-2.0.Ens_110/secundo/star_count.csv",header=T)
+
+rownames(counts)<-counts[,1]
+counts<-counts[,-1]
+
+#remove non-gene rows
+non_genes.iv <- grepl("^N_", rownames(counts))
+counts <- counts[!non_genes.iv,]
+
+rm(non_genes.iv)
+```
+
+# 2. Creating and Filtering our Differential Expression Object
+
+```{r}
+samples <- colnames(counts)
+
+# This regular expression removes "s_" at the start and "_[digit]" at the end
+groups <- gsub("^s_(.*)_\\d+$", "\\1", samples)
+groups
+
+# make a better legend
+groups[1:3] <- "Molino 100~300 µm"
+groups[4:6] <- "Molino over 300 µm"
+groups[7:9] <- "Molino 40~100 µm"
+groups[10:12] <- "Molino below 40 µm"
+groups[13:15] <- "Pachón 100~300 µm"
+groups[16:18] <- "Pachón over 300 µm"
+groups[19:21] <- "Pachón 40~100 µm"
+groups[22:24] <- "Pachón below 40 µm"
+groups[25:27] <- "Surface fish 100~300 µm"
+groups[28:30] <- "Surface fish over 300 µm"
+groups[31:33] <- "Surface fish 40~100 µm"
+groups[34:36] <- "Surface fish below 40 µm"
+groups
+
+#create our DGEList object using our counts and our groups vector
+y <- DGEList(counts=counts, group=groups)
+```
+
+# 3. Filtering lowly expressed genes
+
+```{r}
+# With default settings, each gene is also required to have at least 15 CPM across all samples (sum of all counts per million > 15)
+# recalculate the library sizes after filtering, not usually super important
+
+keep.iv <- filterByExpr(y)
+y <- y[keep.iv, , keep.lib.sizes=FALSE]
+
+```
+
+We can look at a histogram of our counts before and after filtering. To look before filtering, we can use the counts data frame.
+
+```{r}
+# base R way
+hist(log2(unlist(counts)),breaks=100)
+
+# How does our data distribution look now?
+# base R way
+hist(log2(unlist(y$counts)),breaks=100)
+
+# How many genes did we keep?
+length(which(keep.iv))/length(counts[,1])
+
+rm(keep.iv)
+```
+
+# 4. Normalization
+
+```{r}
+y <- calcNormFactors(y)
+
+# we might want these later
+normCounts <- cpm(y, normalized.lib.sizes=T)
+colnames(normCounts) <- paste("cpm.",samples,sep='')
+#write.csv(normCounts,"output/ver2/DEG/CPM counts all.csv")
+
+cols<-rep(c("darkcyan","darkorange3"),each=3)
+boxplot(log2(y$counts),col=cols,main="before norm")
+boxplot(log2(normCounts),col=cols,main="after norm")
+```
+
+# 5. Looking for differentially expressed genes
+
+```{r}
+# setting up the design matrix
+design <- model.matrix(~0+y$samples$group)
+colnames(design) <- levels(y$samples$group)
+design
+
+# Estimating dispersion
+y <- estimateDisp(y, design)
+```
+
+## 5.1 Fitting our model to the data and performing the differential expression test
+
+```{r}
+fit <- glmQLFit(y, design)
+
+# setting up contrast
+# find comparisons based on groups order
+groups
+
+# Annotations
+genedata <- read.table("/n/analysis/genomes/Astyanax_mexicanus/Astyanax_mexicanus-2.0/annotation/Ens_110/tables/Astyanax_mexicanus-2.0.Ens_110.gene_data.txt",sep='\t',quote="",header=T)
+genedata <- genedata[,c(1:2,16)]
+
+# annotate CPM counts first
+cpm_normCounts <- left_join(rownames_to_column(as.data.frame(normCounts)),genedata,by=c("rowname"="Gene_ID"))
+#write.csv(cpm_normCounts,"output/ver2/DEG/Annotated CPM counts all.csv")
+
+
+#zf.hits <- read.csv("/n/projects/fx2482/scRNA-seq-ovary/output/PC40_res0.5_replicatemerge_fishintegrate_harmony/am_dr_rbh.csv")
+```
+
+## 5.2 Annotating and writing out the results to a file
+
+### 5.2.1 > 300 um oocytes
+
+```{r}
+# put the table in a new data frame and order by PValue, descending
+
+pa_vs_sf_300_de <- glmQLFTest(fit, contrast=c(0,0,0,0,0,0,0,1,0,0,0,-1))
+pa_vs_sf_300_de$comparison
+pa_vs_sf_300_de <- pa_vs_sf_300_de$table[order(pa_vs_sf_300_de$table$PValue),]
+pa_vs_sf_300_de$padj <- p.adjust(pa_vs_sf_300_de$PVal, method="BH")
+# annotate the fish data
+pa_vs_sf_300_de <- left_join(rownames_to_column(pa_vs_sf_300_de),genedata,by=c("rowname"="Gene_ID"))
+
+mo_vs_sf_300_de <- glmQLFTest(fit, contrast=c(0,0,0,1,0,0,0,0,0,0,0,-1))
+mo_vs_sf_300_de$comparison
+mo_vs_sf_300_de <- mo_vs_sf_300_de$table[order(mo_vs_sf_300_de$table$PValue),]
+mo_vs_sf_300_de$padj <- p.adjust(mo_vs_sf_300_de$PVal, method="BH")
+mo_vs_sf_300_de <- left_join(rownames_to_column(mo_vs_sf_300_de),genedata,by=c("rowname"="Gene_ID"))
+
+mo_vs_pa_300_de <- glmQLFTest(fit, contrast=c(0,0,0,1,0,0,0,-1,0,0,0,0))
+mo_vs_pa_300_de$comparison
+mo_vs_pa_300_de <- mo_vs_pa_300_de$table[order(mo_vs_pa_300_de$table$PValue),]
+mo_vs_pa_300_de$padj <- p.adjust(mo_vs_pa_300_de$PVal, method="BH")
+mo_vs_pa_300_de <- left_join(rownames_to_column(mo_vs_pa_300_de),genedata,by=c("rowname"="Gene_ID"))
+
+head(pa_vs_sf_300_de)
+head(mo_vs_sf_300_de)
+head(mo_vs_pa_300_de)
+
+# for pa_sf_>300um
+pa_vs_sf_300.up <- pa_vs_sf_300_de[pa_vs_sf_300_de$logFC > 0.5 & pa_vs_sf_300_de$padj < .05,]
+pa_vs_sf_300.down <- pa_vs_sf_300_de[pa_vs_sf_300_de$logFC < -0.5 & pa_vs_sf_300_de$padj < .05,]
+
+# for mo_sf_>300um
+mo_vs_sf_300.up <- mo_vs_sf_300_de[mo_vs_sf_300_de$logFC > 0.5 & mo_vs_sf_300_de$padj < .05,]
+mo_vs_sf_300.down <- mo_vs_sf_300_de[mo_vs_sf_300_de$logFC < -0.5 & mo_vs_sf_300_de$padj < .05,]
+
+# for mo_pa_>300um
+mo_vs_pa_300.up <- mo_vs_pa_300_de[mo_vs_pa_300_de$logFC > 0.5 & mo_vs_pa_300_de$padj < .05,]
+mo_vs_pa_300.down <- mo_vs_pa_300_de[mo_vs_pa_300_de$logFC < -0.5 & mo_vs_pa_300_de$padj < .05,]
+
+# find common one for cav_sur_>300um
+ca_vs_sf_300.up <- left_join(pa_vs_sf_300.up, mo_vs_sf_300.up, by = "rowname")
+ca_vs_sf_300.up <- ca_vs_sf_300.up[complete.cases(ca_vs_sf_300.up), ]
+
+ca_vs_sf_300.down <- left_join(pa_vs_sf_300.down, mo_vs_sf_300.down, by = "rowname")
+ca_vs_sf_300.down <- ca_vs_sf_300.down[complete.cases(ca_vs_sf_300.down), ]
+
+#write.csv(pa_vs_sf_300_de,"output/ver2/DEG/larger_than_300/all genes in Pachón larger than 300 um oocytes compared to surface fish.csv")
+#write.csv(pa_vs_sf_300.up,"output/ver2/DEG/larger_than_300/upregulated genes in Pachón larger than 300 um oocytes compared to surface fish.csv")
+#write.csv(pa_vs_sf_300.down,"output/ver2/DEG/larger_than_300/downregulated genes in Pachón larger than 300 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_sf_300_de,"output/ver2/DEG/larger_than_300/all genes in Molino larger than 300 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_sf_300.up,"output/ver2/DEG/larger_than_300/upregulated genes in Molino larger than 300 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_sf_300.down,"output/ver2/DEG/larger_than_300/downregulated genes in Molino larger than 300 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_pa_300.up,"output/ver2/DEG/larger_than_300/upregulated genes in Molino larger than 300 um oocytes compared to Pachón.csv")
+#write.csv(mo_vs_pa_300.down,"output/ver2/DEG/larger_than_300/downregulated genes in Molino larger than 300 um oocytes compared to Pachón.csv")
+
+#write.csv(ca_vs_sf_300.up,"output/ver2/DEG/larger_than_300/upregulated genes in cavefish larger than 300 um oocytes compared to surface fish.csv")
+#write.csv(ca_vs_sf_300.down,"output/ver2/DEG/larger_than_300/downregulated genes in cavefish larger than 300 um oocytes compared to surface fish.csv")
+
+rm(pa_vs_sf_300_de,mo_vs_sf_300_de,mo_vs_pa_300_de,pa_vs_sf_300.up,pa_vs_sf_300.down,mo_vs_sf_300.up,mo_vs_sf_300.down,mo_vs_pa_300.up,mo_vs_pa_300.down,ca_vs_sf_300.up,ca_vs_sf_300.down)
+```
+
+### 5.2.2 100~300 um oocytes
+
+```{r}
+# put the table in a new data frame and order by PValue, descending
+pa_vs_sf_100_300_de <- glmQLFTest(fit, contrast=c(0,0,0,0,1,0,0,0,-1,0,0,0))
+pa_vs_sf_100_300_de$comparison
+pa_vs_sf_100_300_de <- pa_vs_sf_100_300_de$table[order(pa_vs_sf_100_300_de$table$PValue),]
+pa_vs_sf_100_300_de$padj <- p.adjust(pa_vs_sf_100_300_de$PVal, method="BH")
+# annotate the fish data
+pa_vs_sf_100_300_de <- left_join(rownames_to_column(pa_vs_sf_100_300_de),genedata,by=c("rowname"="Gene_ID"))
+
+mo_vs_sf_100_300_de <- glmQLFTest(fit, contrast=c(1,0,0,0,0,0,0,0,-1,0,0,0))
+mo_vs_sf_100_300_de$comparison
+mo_vs_sf_100_300_de <- mo_vs_sf_100_300_de$table[order(mo_vs_sf_100_300_de$table$PValue),]
+mo_vs_sf_100_300_de$padj <- p.adjust(mo_vs_sf_100_300_de$PVal, method="BH")
+mo_vs_sf_100_300_de <- left_join(rownames_to_column(mo_vs_sf_100_300_de),genedata,by=c("rowname"="Gene_ID"))
+
+mo_vs_pa_100_300_de <- glmQLFTest(fit, contrast=c(1,0,0,0,-1,0,0,0,0,0,0,0))
+mo_vs_pa_100_300_de$comparison
+mo_vs_pa_100_300_de <- mo_vs_pa_100_300_de$table[order(mo_vs_pa_100_300_de$table$PValue),]
+mo_vs_pa_100_300_de$padj <- p.adjust(mo_vs_pa_100_300_de$PVal, method="BH")
+mo_vs_pa_100_300_de <- left_join(rownames_to_column(mo_vs_pa_100_300_de),genedata,by=c("rowname"="Gene_ID"))
+
+
+head(pa_vs_sf_100_300_de)
+head(mo_vs_sf_100_300_de)
+head(mo_vs_pa_100_300_de)
+
+# for pa_sf_100_300um
+pa_vs_sf_100_300.up <- pa_vs_sf_100_300_de[pa_vs_sf_100_300_de$logFC > 0.5 & pa_vs_sf_100_300_de$padj < .05,]
+pa_vs_sf_100_300.down <- pa_vs_sf_100_300_de[pa_vs_sf_100_300_de$logFC < -0.5 & pa_vs_sf_100_300_de$padj < .05,]
+
+# for mo_sf_100_300um
+mo_vs_sf_100_300.up <- mo_vs_sf_100_300_de[mo_vs_sf_100_300_de$logFC > 0.5 & mo_vs_sf_100_300_de$padj < .05,]
+mo_vs_sf_100_300.down <- mo_vs_sf_100_300_de[mo_vs_sf_100_300_de$logFC < -0.5 & mo_vs_sf_100_300_de$padj < .05,]
+
+# for mo_pa_100_300um
+mo_vs_pa_100_300.up <- mo_vs_pa_100_300_de[mo_vs_pa_100_300_de$logFC > 0.5 & mo_vs_pa_100_300_de$padj < .05,]
+mo_vs_pa_100_300.down <- mo_vs_pa_100_300_de[mo_vs_pa_100_300_de$logFC < -0.5 & mo_vs_pa_100_300_de$padj < .05,]
+
+# find common one for cav_sur_100_300um
+ca_vs_sf_100_300.up <- left_join(pa_vs_sf_100_300.up, mo_vs_sf_100_300.up, by = "rowname")
+ca_vs_sf_100_300.up <- ca_vs_sf_100_300.up[complete.cases(ca_vs_sf_100_300.up), ]
+
+ca_vs_sf_100_300.down <- left_join(pa_vs_sf_100_300.down, mo_vs_sf_100_300.down, by = "rowname")
+ca_vs_sf_100_300.down <- ca_vs_sf_100_300.down[complete.cases(ca_vs_sf_100_300.down), ]
+
+#write.csv(pa_vs_sf_100_300_de,"output/ver2/DEG/100_300/all genes in Pachón 100-300 um oocytes compared to surface fish.csv")
+#write.csv(pa_vs_sf_100_300.up,"output/ver2/DEG/100_300/upregulated genes in Pachón 100-300 um oocytes compared to surface fish.csv")
+#write.csv(pa_vs_sf_100_300.down,"output/ver2/DEG/100_300/downregulated genes in Pachón 100-300 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_sf_100_300_de,"output/ver2/DEG/100_300/all genes in Molino 100-300 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_sf_100_300.up,"output/ver2/DEG/100_300/upregulated genes in Molino 100-300 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_sf_100_300.down,"output/ver2/DEG/100_300/downregulated genes in Molino 100-300 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_pa_100_300.up,"output/ver2/DEG/100_300/upregulated genes in Molino 100-300 um oocytes compared to Pachón.csv")
+#write.csv(mo_vs_pa_100_300.down,"output/ver2/DEG/100_300/downregulated genes in Molino 100-300 um oocytes compared to Pachón.csv")
+
+#write.csv(ca_vs_sf_100_300.up,"output/ver2/DEG/100_300/upregulated genes in cavefish 100-300 um oocytes compared to surface fish.csv")
+#write.csv(ca_vs_sf_100_300.down,"output/ver2/DEG/100_300/downregulated genes in cavefish 100-300 um oocytes compared to surface fish.csv")
+
+rm(pa_vs_sf_100_300_de,mo_vs_sf_100_300_de,mo_vs_pa_100_300_de,pa_vs_sf_100_300.up,pa_vs_sf_100_300.down,mo_vs_sf_100_300.up,mo_vs_sf_100_300.down,mo_vs_pa_100_300.up,mo_vs_pa_100_300.down,ca_vs_sf_100_300.up,ca_vs_sf_100_300.down)
+```
+
+### 5.2.3 40~100 um oocytes
+
+```{r}
+# put the table in a new data frame and order by PValue, descending
+
+pa_vs_sf_40_100_de <- glmQLFTest(fit, contrast=c(0,0,0,0,0,1,0,0,0,-1,0,0))
+pa_vs_sf_40_100_de$comparison
+pa_vs_sf_40_100_de <- pa_vs_sf_40_100_de$table[order(pa_vs_sf_40_100_de$table$PValue),]
+pa_vs_sf_40_100_de$padj <- p.adjust(pa_vs_sf_40_100_de$PVal, method="BH")
+# annotate the fish data
+pa_vs_sf_40_100_de <- left_join(rownames_to_column(pa_vs_sf_40_100_de),genedata,by=c("rowname"="Gene_ID"))
+
+mo_vs_sf_40_100_de <- glmQLFTest(fit, contrast=c(0,1,0,0,0,0,0,0,0,-1,0,0))
+mo_vs_sf_40_100_de$comparison
+mo_vs_sf_40_100_de <- mo_vs_sf_40_100_de$table[order(mo_vs_sf_40_100_de$table$PValue),]
+mo_vs_sf_40_100_de$padj <- p.adjust(mo_vs_sf_40_100_de$PVal, method="BH")
+mo_vs_sf_40_100_de <- left_join(rownames_to_column(mo_vs_sf_40_100_de),genedata,by=c("rowname"="Gene_ID"))
+
+mo_vs_pa_40_100_de <- glmQLFTest(fit, contrast=c(0,1,0,0,0,-1,0,0,0,0,0,0))
+mo_vs_pa_40_100_de$comparison
+mo_vs_pa_40_100_de <- mo_vs_pa_40_100_de$table[order(mo_vs_pa_40_100_de$table$PValue),]
+mo_vs_pa_40_100_de$padj <- p.adjust(mo_vs_pa_40_100_de$PVal, method="BH")
+mo_vs_pa_40_100_de <- left_join(rownames_to_column(mo_vs_pa_40_100_de),genedata,by=c("rowname"="Gene_ID"))
+
+head(pa_vs_sf_40_100_de)
+head(mo_vs_sf_40_100_de)
+head(mo_vs_pa_40_100_de)
+
+# for pa_sf_40_100um
+pa_vs_sf_40_100.up <- pa_vs_sf_40_100_de[pa_vs_sf_40_100_de$logFC > 0.5 & pa_vs_sf_40_100_de$padj < .05,]
+pa_vs_sf_40_100.down <- pa_vs_sf_40_100_de[pa_vs_sf_40_100_de$logFC < -0.5 & pa_vs_sf_40_100_de$padj < .05,]
+
+# for mo_sf_40_100um
+mo_vs_sf_40_100.up <- mo_vs_sf_40_100_de[mo_vs_sf_40_100_de$logFC > 0.5 & mo_vs_sf_40_100_de$padj < .05,]
+mo_vs_sf_40_100.down <- mo_vs_sf_40_100_de[mo_vs_sf_40_100_de$logFC < -0.5 & mo_vs_sf_40_100_de$padj < .05,]
+
+# for mo_pa_40_100um
+mo_vs_pa_40_100.up <- mo_vs_pa_40_100_de[mo_vs_pa_40_100_de$logFC > 0.5 & mo_vs_pa_40_100_de$padj < .05,]
+mo_vs_pa_40_100.down <- mo_vs_pa_40_100_de[mo_vs_pa_40_100_de$logFC < -0.5 & mo_vs_pa_40_100_de$padj < .05,]
+
+# find common one for cav_sur_40_100um
+ca_vs_sf_40_100.up <- left_join(pa_vs_sf_40_100.up, mo_vs_sf_40_100.up, by = "rowname")
+ca_vs_sf_40_100.up <- ca_vs_sf_40_100.up[complete.cases(ca_vs_sf_40_100.up), ]
+
+ca_vs_sf_40_100.down <- left_join(pa_vs_sf_40_100.down, mo_vs_sf_40_100.down, by = "rowname")
+ca_vs_sf_40_100.down <- ca_vs_sf_40_100.down[complete.cases(ca_vs_sf_40_100.down), ]
+
+#write.csv(pa_vs_sf_40_100_de,"output/ver2/DEG/40_100/all genes in Pachón 40-100 um oocytes compared to surface fish.csv")
+#write.csv(pa_vs_sf_40_100.up,"output/ver2/DEG/40_100/upregulated genes in Pachón 40-100 um oocytes compared to surface fish.csv")
+#write.csv(pa_vs_sf_40_100.down,"output/ver2/DEG/40_100/downregulated genes in Pachón 40-100 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_sf_40_100_de,"output/ver2/DEG/40_100/all genes in Molino 40-100 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_sf_40_100.up,"output/ver2/DEG/40_100/upregulated genes in Molino 40-100 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_sf_40_100.down,"output/ver2/DEG/40_100/downregulated genes in Molino 40-100 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_pa_40_100.up,"output/ver2/DEG/40_100/upregulated genes in Molino 40-100 um oocytes compared to Pachón.csv")
+#write.csv(mo_vs_pa_40_100.down,"output/ver2/DEG/40_100/downregulated genes in Molino 40-100 um oocytes compared to Pachón.csv")
+
+#write.csv(ca_vs_sf_40_100.up,"output/ver2/DEG/40_100/upregulated genes in cavefish 40-100 um oocytes compared to surface fish.csv")
+#write.csv(ca_vs_sf_40_100.down,"output/ver2/DEG/40_100/downregulated genes in cavefish 40-100 um oocytes compared to surface fish.csv")
+
+rm(pa_vs_sf_40_100_de,mo_vs_sf_40_100_de,mo_vs_pa_40_100_de,pa_vs_sf_40_100.up,pa_vs_sf_40_100.down,mo_vs_sf_40_100.up,mo_vs_sf_40_100.down,mo_vs_pa_40_100.up,mo_vs_pa_40_100.down,ca_vs_sf_40_100.up,ca_vs_sf_40_100.down)
+```
+
+### 5.2.4 < 40 um oocytes
+
+```{r}
+# put the table in a new data frame and order by PValue, descending
+
+pa_vs_sf_40_de <- glmQLFTest(fit, contrast=c(0,0,0,0,0,0,1,0,0,0,-1,0))
+pa_vs_sf_40_de$comparison
+pa_vs_sf_40_de <- pa_vs_sf_40_de$table[order(pa_vs_sf_40_de$table$PValue),]
+pa_vs_sf_40_de$padj <- p.adjust(pa_vs_sf_40_de$PVal, method="BH")
+# annotate the fish data
+pa_vs_sf_40_de <- left_join(rownames_to_column(pa_vs_sf_40_de),genedata,by=c("rowname"="Gene_ID"))
+
+mo_vs_sf_40_de <- glmQLFTest(fit, contrast=c(0,0,1,0,0,0,0,0,0,0,-1,0))
+mo_vs_sf_40_de$comparison
+mo_vs_sf_40_de <- mo_vs_sf_40_de$table[order(mo_vs_sf_40_de$table$PValue),]
+mo_vs_sf_40_de$padj <- p.adjust(mo_vs_sf_40_de$PVal, method="BH")
+mo_vs_sf_40_de <- left_join(rownames_to_column(mo_vs_sf_40_de),genedata,by=c("rowname"="Gene_ID"))
+
+mo_vs_pa_40_de <- glmQLFTest(fit, contrast=c(0,0,1,0,0,0,-1,0,0,0,0,0))
+mo_vs_pa_40_de$comparison
+mo_vs_pa_40_de <- mo_vs_pa_40_de$table[order(mo_vs_pa_40_de$table$PValue),]
+mo_vs_pa_40_de$padj <- p.adjust(mo_vs_pa_40_de$PVal, method="BH")
+mo_vs_pa_40_de <- left_join(rownames_to_column(mo_vs_pa_40_de),genedata,by=c("rowname"="Gene_ID"))
+
+head(pa_vs_sf_40_de)
+head(mo_vs_sf_40_de)
+head(mo_vs_pa_40_de)
+
+# for pa_sf_<40um
+pa_vs_sf_40.up <- pa_vs_sf_40_de[pa_vs_sf_40_de$logFC > 0.5 & pa_vs_sf_40_de$padj < .05,]
+pa_vs_sf_40.down <- pa_vs_sf_40_de[pa_vs_sf_40_de$logFC < -0.5 & pa_vs_sf_40_de$padj < .05,]
+
+# for mo_sf_<40um
+mo_vs_sf_40.up <- mo_vs_sf_40_de[mo_vs_sf_40_de$logFC > 0.5 & mo_vs_sf_40_de$padj < .05,]
+mo_vs_sf_40.down <- mo_vs_sf_40_de[mo_vs_sf_40_de$logFC < -0.5 & mo_vs_sf_40_de$padj < .05,]
+
+# for mo_pa_<40um
+mo_vs_pa_40.up <- mo_vs_pa_40_de[mo_vs_pa_40_de$logFC > 0.5 & mo_vs_pa_40_de$padj < .05,]
+mo_vs_pa_40.down <- mo_vs_pa_40_de[mo_vs_pa_40_de$logFC < -0.5 & mo_vs_pa_40_de$padj < .05,]
+
+# find common one for cav_sur_<40um
+ca_vs_sf_40.up <- left_join(pa_vs_sf_40.up, mo_vs_sf_40.up, by = "rowname")
+ca_vs_sf_40.up <- ca_vs_sf_40.up[complete.cases(ca_vs_sf_40.up), ]
+
+ca_vs_sf_40.down <- left_join(pa_vs_sf_40.down, mo_vs_sf_40.down, by = "rowname")
+ca_vs_sf_40.down <- ca_vs_sf_40.down[complete.cases(ca_vs_sf_40.down), ]
+
+#write.csv(pa_vs_sf_40_de,"output/ver2/DEG/smaller_than_40/all genes in Pachón smaller than 40 um oocytes compared to surface fish.csv")
+#write.csv(pa_vs_sf_40.up,"output/ver2/DEG/smaller_than_40/upregulated genes in Pachón smaller than 40 um oocytes compared to surface fish.csv")
+#write.csv(pa_vs_sf_40.down,"output/ver2/DEG/smaller_than_40/downregulated genes in Pachón smaller than 40 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_sf_40_de,"output/ver2/DEG/smaller_than_40/all genes in Molino smaller than 40 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_sf_40.up,"output/ver2/DEG/smaller_than_40/upregulated genes in Molino smaller than 40 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_sf_40.down,"output/ver2/DEG/smaller_than_40/downregulated genes in Molino smaller than 40 um oocytes compared to surface fish.csv")
+#write.csv(mo_vs_pa_40.up,"output/ver2/DEG/smaller_than_40/upregulated genes in Molino smaller than 40 um oocytes compared to Pachón.csv")
+#write.csv(mo_vs_pa_40.down,"output/ver2/DEG/smaller_than_40/downregulated genes in Molino smaller than 40 um oocytes compared to Pachón.csv")
+
+#write.csv(ca_vs_sf_40.up,"output/ver2/DEG/smaller_than_40/upregulated genes in cavefish smaller than 40 um oocytes compared to surface fish.csv")
+#write.csv(ca_vs_sf_40.down,"output/ver2/DEG/smaller_than_40/downregulated genes in cavefish smaller than 40 um oocytes compared to surface fish.csv")
+
+rm(pa_vs_sf_40_de,mo_vs_sf_40_de,mo_vs_pa_40_de,pa_vs_sf_40.up,pa_vs_sf_40.down,mo_vs_sf_40.up,mo_vs_sf_40.down,mo_vs_pa_40.up,mo_vs_pa_40.down,ca_vs_sf_40.up,ca_vs_sf_40.down)
+```
+
+#### 300 vs 40-100 um oocytes
+
+```{r}
+# put the table in a new data frame and order by PValue, descending
+
+sf_300vs_40_100_de <- glmQLFTest(fit, contrast=c(0,0,0,0,0,0,0,0,0,-1,0,1))
+sf_300vs_40_100_de$comparison
+sf_300vs_40_100_de <- sf_300vs_40_100_de$table[order(sf_300vs_40_100_de$table$PValue),]
+sf_300vs_40_100_de$padj <- p.adjust(sf_300vs_40_100_de$PVal, method="BH")
+# annotate the fish data
+sf_300vs_40_100_de <- left_join(rownames_to_column(sf_300vs_40_100_de),genedata,by=c("rowname"="Gene_ID"))
+
+head(sf_300vs_40_100_de)
+
+sf_300vs_40_100.up <- sf_300vs_40_100_de[sf_300vs_40_100_de$logFC > 1 & sf_300vs_40_100_de$padj < .05,]
+sf_300vs_40_100.down <- sf_300vs_40_100_de[sf_300vs_40_100_de$logFC < -1 & sf_300vs_40_100_de$padj < .05,]
+
+
+#write.csv(sf_300vs_40_100_de,"output/ver2/DEG/SF all genes in 40-100 um oocytes compared to 300um oocytes.csv")
+#write.csv(sf_300vs_40_100.up,"output/ver2/DEG/SF upregualted genes in 40-100 um oocytes compared to 300um oocytes.csv")
+#write.csv(sf_300vs_40_100.down,"output/ver2/DEG/SF downregulated genes in 40-100 um oocytes compared to 300um oocytes.csv")
+
+rm(sf_300vs_40_100.up,sf_300vs_40_100.down,sf_300vs_40_100_de)
+```
