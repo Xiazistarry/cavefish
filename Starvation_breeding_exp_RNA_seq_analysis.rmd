@@ -1,0 +1,409 @@
+---
+title: "MOLNG-3964-3965-analysis"
+author: "Fanning Xia"
+output: html_document
+date: "2024-06-06"
+editor_options: 
+  chunk_output_type: console
+---
+
+#MOLNG-3964: Starvation experiment with surface fish and Tinaja, will served as a supplementary information, refering to Ana's experiment.
+#MOLNG-3965: Starvation experiment with surface fish and Pachón, refering to my experiment.
+
+
+# 0. Preparation
+
+```{r}
+
+setwd("/n/projects/fx2482/Bulk-RNA-seq/MOLNG-3964-3965/")
+
+# load packages
+library(edgeR)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(ggfortify)
+library(cluster)
+library(vangogh)
+
+pvg12 <- c("#0096C7","#023E8A","#48CAE4","#ADE8F4","#CA6702","#E85D04","#EE9B00","#E9D8A6","#5E548E","#231942","#9F86C0","#BE95C4")
+pvg35 <- c(vangogh_palette("StarryRhone"),
+           vangogh_palette("SelfPortrait"),
+           vangogh_palette("Irises"),
+           vangogh_palette("CafeDeNuit"),
+           vangogh_palette("Landscape"),
+           vangogh_palette("Shoes"),
+           vangogh_palette("SunflowersLondon"))
+pvg20 <- c(vangogh_palette("Landscape"),
+           vangogh_palette("Shoes"),
+           vangogh_palette("CafeTerrace"), 
+           vangogh_palette("Chaise"))
+pvg10 <- c("#979FA2","#93D2DF","#0A9396","#94D2BD","#E9D8A6","#EE9B00","#CA6702","#D8AE9B","#DF76BC","#E2696D")
+
+pvg3 <- c("#979FA2","#EE9B00","#93D2DF")
+
+pvg4 <- c("#979FA2","#EE9B00","#DF76BC","#93D2DF")
+
+pvg4o <- c("#979FA2","black","#EE9B00","#CA6702")
+pvg4o2 <- c("#979FA2","black","#DF76BC","#A02E5F")
+
+```
+
+# 1. Read data and cleanup the data
+
+```{r}
+# read the data
+# MOLNG-3964
+counts_3964 <- read.csv("/n/core/Bioinformatics/secondary/Rohner/fx2482/MOLNG-3964.Astyanax_mexicanus-2.0.Ens_110/secundo/star_count.csv",header=T)
+# MOLNG-3965
+counts_3965 <- read.csv("/n/core/Bioinformatics/secondary/Rohner/fx2482/MOLNG-3965.Astyanax_mexicanus-2.0.Ens_110/secundo/star_count.csv",header=T)
+
+# Ana's experiment only
+counts_ana <- counts_3964[,1:13]
+
+# my experiment only
+counts_me <- counts_3965[,1:23]
+
+rm(counts_1,counts_2,counts_3)
+
+# use geneID as the rowname
+rownames(counts_ana)<-counts_ana[,1]
+counts_ana<-counts_ana[,-1]
+
+rownames(counts_me)<-counts_me[,1]
+counts_me<-counts_me[,-1]
+
+# remove non-gene rows
+non_genes.iv <- grepl("^N_", rownames(counts_ana))
+counts_ana <- counts_ana[!non_genes.iv,]
+rm(non_genes.iv)
+
+non_genes.iv <- grepl("^N_", rownames(counts_me))
+counts_me <- counts_me[!non_genes.iv,]
+rm(non_genes.iv)
+```
+
+# 2. Creating and Filtering our Differential Expression Object
+
+```{r}
+# save these for later
+samples_ana <- colnames(counts_ana)
+samples_me <- colnames(counts_me)
+
+# this regular expression removes "s_" at the start and "_[digit]" at the end
+groups_ana <- gsub("^s_(.*)_\\d+$", "\\1", samples_ana)
+# replace "_" to  
+groups_ana <- gsub("_", " ", groups_ana)
+# replace "surface" to "Surface"
+groups_ana <- gsub("surface", "Surface", groups_ana)
+# replace "tinaja" to "Tinaja"
+groups_ana <- gsub("tinaja", "Tinaja", groups_ana)
+# replace "ctrl" to "control"
+groups_ana <- gsub("ctrl", "control", groups_ana)
+
+groups_ana
+
+# this regular expression removes "s_" at the start and "_[digit]" at the end
+groups_me <- gsub("^s_(.*)_\\d+$", "\\1", samples_me)
+# replace "_" to " "
+groups_me <- gsub("_", " ", groups_me)
+# replace "surface" to "Surface"
+groups_me <- gsub("surface", "Surface", groups_me)
+# replace "pachon" to "Pachón"
+groups_me <- gsub("pachon", "Pachón", groups_me)
+# replace "ctrl" to "control"
+groups_me <- gsub("ctrl", "control", groups_me)
+# replace "old/new" to "" 
+# do not differntiate from old or new group when do analysis
+groups_me <- gsub(" old", "", groups_me)
+groups_me <- gsub(" new", "", groups_me)
+
+groups_me
+
+# create our DGEList object using our counts and our groups vector
+y_ana <- DGEList(counts=counts_ana, group=groups_ana)
+y_me <- DGEList(counts=counts_me, group=groups_me)
+```
+
+# 3. Filtering lowly expressed genes
+
+```{r}
+# With default settings, each gene is also required to have at least 15 CPM across all samples (sum of all counts per million > 15)
+# recalculate the library sizes after filtering, not usually super important
+
+keep.ana.iv <- filterByExpr(y_ana)
+y_ana <- y_ana[keep.ana.iv, , keep.lib.sizes=FALSE]
+
+keep.me.iv <- filterByExpr(y_me)
+y_me <- y_me[keep.me.iv, , keep.lib.sizes=FALSE]
+
+```
+
+We can look at a histogram of our counts before and after filtering. To look before filtering, we can use the counts data frame.
+
+```{r}
+#base R way
+hist(log2(unlist(counts_ana)),breaks=100)
+hist(log2(unlist(counts_me)),breaks=100)
+
+# How does our data distribution look now?
+# base R way
+hist(log2(unlist(y_ana$counts)),breaks=100)
+hist(log2(unlist(y_me$counts)),breaks=100)
+
+# How many genes did we keep?
+length(which(keep.ana.iv))/length(counts_ana[,1])
+length(which(keep.me.iv))/length(counts_me[,1])
+
+rm(keep.ana.iv,keep.me.iv)
+```
+
+# 4. Normalization
+
+```{r}
+y_ana <- calcNormFactors(y_ana)
+y_me <- calcNormFactors(y_me)
+
+# we might want these later
+normCounts_ana <- cpm(y_ana, normalized.lib.sizes=T)
+normCounts_me <- cpm(y_me, normalized.lib.sizes=T)
+
+colnames(normCounts_ana) <- paste("cpm.",samples_ana,sep='')
+colnames(normCounts_me) <- paste("cpm.",samples_me,sep='')
+
+#write.csv(normCounts_ana,"output/ver2/DEG/MOLNG-3964/CPM counts Ana's experiment - SF and TI.csv")
+#write.csv(normCounts_me,"output/ver2/DEG/CPM counts my experiment - SF and PA.csv")
+
+cols<-rep(c("darkcyan","darkorange3"),each=3)
+boxplot(log2(y_ana$counts),col=cols,main="before norm")
+boxplot(log2(normCounts_ana),col=cols,main="after norm")
+
+boxplot(log2(y_me$counts),col=cols,main="before norm")
+boxplot(log2(normCounts_me),col=cols,main="after norm")
+
+```
+
+# 5. Looking for differentially expressed genes
+
+## 5.1 Ana's experiment
+
+```{r}
+# setting up the design matrix
+design_ana <- model.matrix(~0+y_ana$samples$group)
+colnames(design_ana) <- levels(y_ana$samples$group)
+design_ana
+
+# Estimating dispersion
+y_ana <- estimateDisp(y_ana, design_ana)
+```
+
+### 5.1.1 Fitting our model to the data and performing the differential expression test
+
+```{r}
+fit_ana <- glmQLFit(y_ana, design_ana)
+
+# setting up contrast
+# find comparisons based on groups order
+groups_ana
+
+# Annotations
+genedata <- read.table("/n/analysis/genomes/Astyanax_mexicanus/Astyanax_mexicanus-2.0/annotation/Ens_110/tables/Astyanax_mexicanus-2.0.Ens_110.gene_data.txt",sep='\t',quote="",header=T)
+genedata <- genedata[,c(1:2,16)]
+
+# annotate the CPM counts
+cpm_normCounts_ana <- left_join(rownames_to_column(as.data.frame(normCounts_ana)),genedata,by=c("rowname"="Gene_ID"))
+cpm_normCounts_me <- left_join(rownames_to_column(as.data.frame(normCounts_me)),genedata,by=c("rowname"="Gene_ID"))
+
+#write.csv(cpm_normCounts_ana,"output/ver2/DEG/MOLNG-3964/Annotated CPM counts Ana's experiment - SF and TI.csv")
+#write.csv(cpm_normCounts_me,"output/ver2/DEG/Annotated CPM counts my experiment - SF and PA.csv")
+
+#zf.hits <- read.csv("/n/projects/fx2482/scRNA-seq-ovary/output/PC40_res0.5_replicatemerge_fishintegrate_harmony/am_dr_rbh.csv")
+```
+
+### 5.1.2 Annotating and writing out the results to a file
+
+```{r}
+# put the table in a new data frame and order by PValue, descending
+
+ana_sf_starved_vs_ctrl_de <- glmQLFTest(fit_ana, contrast=c(-1,1,0,0))
+ana_sf_starved_vs_ctrl_de$comparison
+ana_sf_starved_vs_ctrl_de <- ana_sf_starved_vs_ctrl_de$table[order(ana_sf_starved_vs_ctrl_de$table$PValue),]
+ana_sf_starved_vs_ctrl_de$padj <- p.adjust(ana_sf_starved_vs_ctrl_de$PVal, method="BH")
+# annotate the fish data
+ana_sf_starved_vs_ctrl_de <- left_join(rownames_to_column(ana_sf_starved_vs_ctrl_de),genedata,by=c("rowname"="Gene_ID"))
+
+ti_starved_vs_ctrl_de <- glmQLFTest(fit_ana, contrast=c(0,0,-1,1))
+ti_starved_vs_ctrl_de$comparison
+ti_starved_vs_ctrl_de <- ti_starved_vs_ctrl_de$table[order(ti_starved_vs_ctrl_de$table$PValue),]
+ti_starved_vs_ctrl_de$padj <- p.adjust(ti_starved_vs_ctrl_de$PVal, method="BH")
+# annotate the fish data
+ti_starved_vs_ctrl_de <- left_join(rownames_to_column(ti_starved_vs_ctrl_de),genedata,by=c("rowname"="Gene_ID"))
+
+ti_vs_sf_ctrl_de <- glmQLFTest(fit_ana, contrast=c(-1,0,1,0))
+ti_vs_sf_ctrl_de$comparison
+ti_vs_sf_ctrl_de <- ti_vs_sf_ctrl_de$table[order(ti_vs_sf_ctrl_de$table$PValue),]
+ti_vs_sf_ctrl_de$padj <- p.adjust(ti_vs_sf_ctrl_de$PVal, method="BH")
+# annotate the fish data
+ti_vs_sf_ctrl_de <- left_join(rownames_to_column(ti_vs_sf_ctrl_de),genedata,by=c("rowname"="Gene_ID"))
+
+ti_vs_sf_starved_de <- glmQLFTest(fit_ana, contrast=c(0,-1,0,1))
+ti_vs_sf_starved_de$comparison
+ti_vs_sf_starved_de <- ti_vs_sf_starved_de$table[order(ti_vs_sf_starved_de$table$PValue),]
+ti_vs_sf_starved_de$padj <- p.adjust(ti_vs_sf_starved_de$PVal, method="BH")
+# annotate the fish data
+ti_vs_sf_starved_de <- left_join(rownames_to_column(ti_vs_sf_starved_de),genedata,by=c("rowname"="Gene_ID"))
+
+head(ana_sf_starved_vs_ctrl_de)
+head(ti_starved_vs_ctrl_de)
+head(ti_vs_sf_ctrl_de)
+head(ti_vs_sf_starved_de)
+
+# for sf: starvation vs control 
+ana_sf_starved_vs_ctrl_up <- ana_sf_starved_vs_ctrl_de[ana_sf_starved_vs_ctrl_de$logFC > 0.5 & ana_sf_starved_vs_ctrl_de$padj < .05,]
+ana_sf_starved_vs_ctrl_down <- ana_sf_starved_vs_ctrl_de[ana_sf_starved_vs_ctrl_de$logFC < -0.5 & ana_sf_starved_vs_ctrl_de$padj < .05,]
+
+#write.csv(ana_sf_starved_vs_ctrl_de,"output/ver2/DEG/MOLNG-3964/all genes in surface starved compared to surface ctrl.csv")
+#write.csv(ana_sf_starved_vs_ctrl_up,"output/ver2/DEG/MOLNG-3964/Upregulated genes in surface starved compared to surface ctrl.csv")
+#write.csv(ana_sf_starved_vs_ctrl_down,"output/ver2/DEG/MOLNG-3964/Downregulated genes in surface starved compared to surface ctrl.csv")
+
+
+# for ti: starvation vs control 
+ti_starved_vs_ctrl_up <- ti_starved_vs_ctrl_de[ti_starved_vs_ctrl_de$logFC > 0.5 & ti_starved_vs_ctrl_de$padj < .05,]
+ti_starved_vs_ctrl_down <- ti_starved_vs_ctrl_de[ti_starved_vs_ctrl_de$logFC < -0.5 & ti_starved_vs_ctrl_de$padj < .05,]
+
+#write.csv(ti_starved_vs_ctrl_de,"output/ver2/DEG/MOLNG-3964/all genes in tinaja starved compared to tinaja ctrl.csv")
+#write.csv(ti_starved_vs_ctrl_up,"output/ver2/DEG/MOLNG-3964/Upregulated genes in tinaja starved compared to tinaja ctrl.csv")
+#write.csv(ti_starved_vs_ctrl_down,"output/ver2/DEG/MOLNG-3964/Downregulated genes in tinaja starved compared to tinaja ctrl.csv")
+
+
+# for control: sf vs ti 
+ti_vs_sf_ctrl_up <- ti_vs_sf_ctrl_de[ti_vs_sf_ctrl_de$logFC > 0.5 & ti_vs_sf_ctrl_de$padj < .05,]
+ti_vs_sf_ctrl_down <- ti_vs_sf_ctrl_de[ti_vs_sf_ctrl_de$logFC < -0.5 & ti_vs_sf_ctrl_de$padj < .05,]
+
+#write.csv(ti_vs_sf_ctrl_de,"output/ver2/DEG/MOLNG-3964/all genes in tinaja ctrl compared to surface ctrl.csv")
+#write.csv(ti_vs_sf_ctrl_up,"output/ver2/DEG/MOLNG-3964/Upregulated genes in tinaja ctrl compared to surface ctrl.csv")
+#write.csv(ti_vs_sf_ctrl_down,"output/ver2/DEG/MOLNG-3964/Downregulated genes in tinaja ctrl compared to surface ctrl.csv")
+
+
+# for starved: sf vs ti 
+ti_vs_sf_starved_up <- ti_vs_sf_starved_de[ti_vs_sf_starved_de$logFC > 0.5 & ti_vs_sf_starved_de$padj < .05,]
+ti_vs_sf_starved_down <- ti_vs_sf_starved_de[ti_vs_sf_starved_de$logFC < -0.5 & ti_vs_sf_starved_de$padj < .05,]
+
+#write.csv(ti_vs_sf_starved_de,"output/ver2/DEG/MOLNG-3964/all genes in tinaja starved compared to surface starved.csv")
+#write.csv(ti_vs_sf_starved_up,"output/ver2/DEG/MOLNG-3964/Upregulated genes in tinaja starved compared to surface starved.csv")
+#write.csv(ti_vs_sf_starved_down,"output/ver2/DEG/MOLNG-3964/Downregulated genes in tinaja starved compared to surface starved.csv")
+
+rm(design_ana,fit_ana)
+```
+
+## 5.2 My experiment
+
+```{r}
+# setting up the design matrix
+design <- model.matrix(~0+y_me$samples$group)
+colnames(design) <- levels(y_me$samples$group)
+design
+
+# Estimating dispersion
+y_me <- estimateDisp(y_me, design)
+```
+
+### 5.2.1 Fitting our model to the data and performing the differential expression test
+
+```{r}
+fit <- glmQLFit(y_me, design)
+
+# setting up contrast
+# find comparisons based on groups order
+groups_me
+
+# Annotations
+genedata <- read.table("/n/analysis/genomes/Astyanax_mexicanus/Astyanax_mexicanus-2.0/annotation/Ens_110/tables/Astyanax_mexicanus-2.0.Ens_110.gene_data.txt",sep='\t',quote="",header=T)
+genedata <- genedata[,c(1:2,16)]
+
+#zf.hits <- read.csv("/n/projects/fx2482/scRNA-seq-ovary/output/PC40_res0.5_replicatemerge_fishintegrate_harmony/am_dr_rbh.csv")
+```
+
+### 5.2.2 Annotating and writing out the results to a file
+
+```{r}
+# put the table in a new data frame and order by PValue, descending
+
+sf_starved_vs_ctrl_de <- glmQLFTest(fit, contrast=c(0,0,-1,1))
+sf_starved_vs_ctrl_de$comparison
+sf_starved_vs_ctrl_de <- sf_starved_vs_ctrl_de$table[order(sf_starved_vs_ctrl_de$table$PValue),]
+sf_starved_vs_ctrl_de$padj <- p.adjust(sf_starved_vs_ctrl_de$PVal, method="BH")
+# annotate the fish data
+sf_starved_vs_ctrl_de <- left_join(rownames_to_column(sf_starved_vs_ctrl_de),genedata,by=c("rowname"="Gene_ID"))
+
+pa_starved_vs_ctrl_de <- glmQLFTest(fit, contrast=c(-1,1,0,0))
+pa_starved_vs_ctrl_de$comparison
+pa_starved_vs_ctrl_de <- pa_starved_vs_ctrl_de$table[order(pa_starved_vs_ctrl_de$table$PValue),]
+pa_starved_vs_ctrl_de$padj <- p.adjust(pa_starved_vs_ctrl_de$PVal, method="BH")
+# annotate the fish data
+pa_starved_vs_ctrl_de <- left_join(rownames_to_column(pa_starved_vs_ctrl_de),genedata,by=c("rowname"="Gene_ID"))
+
+pa_vs_sf_ctrl_de <- glmQLFTest(fit, contrast=c(1,0,-1,0))
+pa_vs_sf_ctrl_de$comparison
+pa_vs_sf_ctrl_de <- pa_vs_sf_ctrl_de$table[order(pa_vs_sf_ctrl_de$table$PValue),]
+pa_vs_sf_ctrl_de$padj <- p.adjust(pa_vs_sf_ctrl_de$PVal, method="BH")
+# annotate the fish data
+pa_vs_sf_ctrl_de <- left_join(rownames_to_column(pa_vs_sf_ctrl_de),genedata,by=c("rowname"="Gene_ID"))
+
+pa_vs_sf_starved_de <- glmQLFTest(fit, contrast=c(0,1,0,-1))
+pa_vs_sf_starved_de$comparison
+pa_vs_sf_starved_de <- pa_vs_sf_starved_de$table[order(pa_vs_sf_starved_de$table$PValue),]
+pa_vs_sf_starved_de$padj <- p.adjust(pa_vs_sf_starved_de$PVal, method="BH")
+# annotate the fish data
+pa_vs_sf_starved_de <- left_join(rownames_to_column(pa_vs_sf_starved_de),genedata,by=c("rowname"="Gene_ID"))
+
+head(sf_starved_vs_ctrl_de)
+head(pa_starved_vs_ctrl_de)
+head(pa_vs_sf_ctrl_de)
+head(pa_vs_sf_starved_de)
+
+
+# for sf: starvation vs control 
+sf_starved_vs_ctrl_up <- sf_starved_vs_ctrl_de[sf_starved_vs_ctrl_de$logFC > 0.5 & sf_starved_vs_ctrl_de$padj < .05,]
+sf_starved_vs_ctrl_down <- sf_starved_vs_ctrl_de[sf_starved_vs_ctrl_de$logFC < -0.5 & sf_starved_vs_ctrl_de$padj < .05,]
+
+#write.csv(sf_starved_vs_ctrl_de,"output/ver2/DEG/all genes in surface_starved compared to surface_ctrl.csv")
+#write.csv(sf_starved_vs_ctrl_up,"output/ver2/DEG/Upregulated genes in surface_starved compared to surface_ctrl.csv")
+#write.csv(sf_starved_vs_ctrl_down,"output/ver2/DEG/Downregulated genes in surface_starved compared to surface_ctrl.csv")
+
+# for pa: starvation vs control 
+pa_starved_vs_ctrl_up <- pa_starved_vs_ctrl_de[pa_starved_vs_ctrl_de$logFC > 0.5 & pa_starved_vs_ctrl_de$padj < .05,]
+pa_starved_vs_ctrl_down <- pa_starved_vs_ctrl_de[pa_starved_vs_ctrl_de$logFC < -0.5 & pa_starved_vs_ctrl_de$padj < .05,]
+
+#write.csv(pa_starved_vs_ctrl_de,"output/ver2/DEG/all genes in pachón_starved compared to pachón_ctrl.csv")
+#write.csv(pa_starved_vs_ctrl_up,"output/ver2/DEG/Upregulated genes in pachón_starved compared to pachón_ctrl.csv")
+#write.csv(pa_starved_vs_ctrl_down,"output/ver2/DEG/Downregulated genes in pachón_starved compared to pachón_ctrl.csv")
+
+# for control: pa vs sf
+pa_vs_sf_ctrl_up <- pa_vs_sf_ctrl_de[pa_vs_sf_ctrl_de$logFC > 0.5 & pa_vs_sf_ctrl_de$padj < .05,]
+pa_vs_sf_ctrl_down <- pa_vs_sf_ctrl_de[pa_vs_sf_ctrl_de$logFC < -0.5 & pa_vs_sf_ctrl_de$padj < .05,]
+
+#write.csv(pa_vs_sf_ctrl_de,"output/ver2/DEG/all genes in pachón_ctrl compared to surface_ctrl.csv")
+#write.csv(pa_vs_sf_ctrl_up,"output/ver2/DEG/Upregulated genes in pachón_ctrl compared to surface_ctrl.csv")
+#write.csv(pa_vs_sf_ctrl_down,"output/ver2/DEG/Downregulated genes in pachón_ctrl compared to surface_ctrl.csv")
+
+
+# for starved: pa vs sf
+pa_vs_sf_starved_up <- pa_vs_sf_starved_de[pa_vs_sf_starved_de$logFC > 0.5 & pa_vs_sf_starved_de$padj < .05,]
+pa_vs_sf_starved_down <- pa_vs_sf_starved_de[pa_vs_sf_starved_de$logFC < -0.5 & pa_vs_sf_starved_de$padj < .05,]
+
+#write.csv(pa_vs_sf_starved_de,"output/ver2/DEG/all genes in pachón_starved compared to surface_starved.csv")
+#write.csv(pa_vs_sf_starved_up,"output/ver2/DEG/Upregulated genes in pachón_starved compared to surface_starved.csv")
+#write.csv(pa_vs_sf_starved_down,"output/ver2/DEG/Downregulated genes in pachón_starved compared to surface_starved.csv")
+
+rm(fit,design)
+```
+
+# SessionInfo
+```{r}
+sessionInfo()
+```
+
+
+
