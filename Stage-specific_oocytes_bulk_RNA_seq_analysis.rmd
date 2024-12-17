@@ -424,3 +424,8 @@ sf_300vs_40_100.down <- sf_300vs_40_100_de[sf_300vs_40_100_de$logFC < -1 & sf_30
 
 rm(sf_300vs_40_100.up,sf_300vs_40_100.down,sf_300vs_40_100_de)
 ```
+
+# Session Info
+```{r}
+sessionInfo()
+```
