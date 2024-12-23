@@ -8,6 +8,6 @@ Original data are deposited at [MSV000096660](https://massive.ucsd.edu/ProteoSAF
 ### 2. [Lipid mass spectrometry data for 2-cell stage embryos](https://github.com/Xiazistarry/cavefish/blob/main/Lipidomics_analysis.rmd) 
 Original data are deposited at
 ### 3. [Bulk RNA sequencing analysis for adult fish stage-specific oocytes](https://github.com/Xiazistarry/cavefish/blob/main/Stage-specific_oocytes_RNA_seq_analysis.rmd)
-Original data are deposited at
+Original data are deposited at [GSE284736](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE284736)
 ### 4. [Bulk RNA sequencing analysis for ovaries from starved surface fish and cavefish](https://github.com/Xiazistarry/cavefish/blob/main/Starvation_breeding_exp_RNA_seq_analysis.rmd)
-Original data are deposited at
+Original data are deposited at [GSE284736](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE284736)
