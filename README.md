@@ -1,5 +1,5 @@
 # Reproductive Adaptation of *Astyanax mexicanus* Under Nutrient Limitation
-(paper link)
+[preprint](https://www.biorxiv.org/content/10.1101/2025.02.13.638191v1.full)
 
 Analysis codes for 
 
